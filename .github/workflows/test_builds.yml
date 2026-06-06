@@ -1,0 +1,122 @@
+name: External Builds Stress Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-stricc:
+    name: Build Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18 all
+          sudo apt-get install -y llvm-18-dev libclang-18-dev libpolly-18-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build stricc Release
+        run: |
+          export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          cargo build --release --workspace
+
+      - name: Archive stricc build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stricc-binaries
+          path: |
+            target/release/stricc
+            target/release/libstricc_rt.a
+
+  sqlite-build:
+    name: Compile SQLite
+    needs: build-stricc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download stricc
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-binaries
+          path: target/release
+
+      - name: Setup stricc execution permissions
+        run: chmod +x target/release/stricc
+
+      - name: Download SQLite Amalgamation
+        run: |
+          curl -O https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+          unzip sqlite-amalgamation-3460000.zip
+
+      - name: Compile SQLite with stricc
+        continue-on-error: true
+        run: |
+          ./target/release/stricc -O2 -c sqlite-amalgamation-3460000/sqlite3.c
+
+  redis-build:
+    name: Compile Redis
+    needs: build-stricc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download stricc
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-binaries
+          path: target/release
+
+      - name: Setup stricc execution permissions
+        run: chmod +x target/release/stricc
+
+      - name: Clone Redis
+        run: git clone --depth 1 https://github.com/redis/redis.git
+
+      - name: Compile Redis with stricc
+        continue-on-error: true
+        run: |
+          export STRICC_RT_PATH=$(pwd)/target/release/libstricc_rt.a
+          cd redis
+          make CC=$(pwd)/../target/release/stricc -j$(nproc)
+
+  tcc-build:
+    name: Compile TinyCC
+    needs: build-stricc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download stricc
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-binaries
+          path: target/release
+
+      - name: Setup stricc execution permissions
+        run: chmod +x target/release/stricc
+
+      - name: Clone TinyCC
+        run: git clone --depth 1 https://repo.or.cz/tinycc.git
+
+      - name: Compile TinyCC with stricc
+        continue-on-error: true
+        run: |
+          export STRICC_RT_PATH=$(pwd)/target/release/libstricc_rt.a
+          cd tinycc
+          ./configure --cc=$(pwd)/../target/release/stricc
+          make -j$(nproc)
