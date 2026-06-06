@@ -24,4 +24,5 @@ target
 a.out
 temp_test
 *.ll
+/dist/
 

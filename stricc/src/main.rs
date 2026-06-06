@@ -3,7 +3,7 @@ use stricc::driver::{Driver, DriverOptions};
 
 fn main() {
     let matches = Command::new("stricc")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("stricc: Safe C Compiler")
         .arg(
             Arg::new("inputs")

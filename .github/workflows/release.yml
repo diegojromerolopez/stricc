@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build Static Linux Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Static Linux Binaries
+        run: make build-static-linux
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stricc-linux-binaries
+          path: dist/*
+
+  build-macos:
+    name: Build Native macOS Binary
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: brew install llvm@18
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build macOS Binaries
+        run: |
+          export LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)
+          export PATH="$(brew --prefix llvm@18)/bin:$PATH"
+          make build-macos
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stricc-macos-binaries
+          path: dist/*
+
+  publish-release:
+    name: Publish Release Assets
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos]
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-linux-binaries
+          path: dist
+
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-macos-binaries
+          path: dist
+
+      - name: List Files
+        run: ls -lh dist/
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release'
+        with:
+          files: |
+            dist/stricc-linux
+            dist/libstricc_rt-linux.a
+            dist/stricc-macos
+            dist/libstricc_rt-macos.a
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,51 @@
+# Stage 1: Build environment with osxcross
+FROM rust:1.80-slim AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    clang \
+    cmake \
+    libssl-dev \
+    xz-utils \
+    git \
+    wget \
+    patch \
+    llvm-dev \
+    libxml2-dev \
+    libffi-dev \
+    zlib1g-dev \
+    build-essential \
+    bash \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install osxcross
+# Note: You must place your macOS SDK tarball (e.g., MacOSX14.5.sdk.tar.xz) in the build context
+WORKDIR /opt
+COPY MacOSX*.sdk.tar.xz /opt/osxcross/tarballs/
+RUN git clone https://github.com/tpoechtrager/osxcross /opt/osxcross-src && \
+    mv /opt/osxcross/tarballs/* /opt/osxcross-src/tarballs/ || true && \
+    cd /opt/osxcross-src && \
+    UNATTENDED=1 ./build.sh && \
+    mv /opt/osxcross-src/target /opt/osxcross && \
+    rm -rf /opt/osxcross-src
+
+ENV PATH="/opt/osxcross/bin:${PATH}"
+
+# Add macOS targets to rustup
+RUN rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+WORKDIR /usr/src/stricc
+COPY . .
+
+# Build for both x86_64 and aarch64 macOS
+# We configure target compiler variables for CC/CXX to point to the osxcross clang wrapper
+RUN CC=o64-clang CXX=o64-clang++ cargo build --release --target x86_64-apple-darwin && \
+    CC=oa64-clang CXX=oa64-clang++ cargo build --release --target aarch64-apple-darwin
+
+# Stage 2: Output exporter
+FROM scratch AS exporter
+COPY --from=builder /usr/src/stricc/target/x86_64-apple-darwin/release/stricc /stricc-macos-x86_64
+COPY --from=builder /usr/src/stricc/target/aarch64-apple-darwin/release/stricc /stricc-macos-aarch64
+COPY --from=builder /usr/src/stricc/target/x86_64-apple-darwin/release/libstricc_rt.a /libstricc_rt-macos-x86_64.a
+COPY --from=builder /usr/src/stricc/target/aarch64-apple-darwin/release/libstricc_rt.a /libstricc_rt-macos-aarch64.a
