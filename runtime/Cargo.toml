@@ -1,0 +1,13 @@
+[package]
+name = "libstricc_rt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "stricc_rt"
+crate-type = ["staticlib", "rlib"]
+test = false
+
+[dependencies]
+backtrace = "0.3"
+libc = "0.2"

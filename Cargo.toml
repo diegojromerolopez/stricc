@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "stricc",
+    "runtime",
+]
+resolver = "2"

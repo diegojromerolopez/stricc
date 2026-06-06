@@ -1,0 +1,11 @@
+[package]
+name = "stricc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+ariadne = "0.3"
+tempfile = "3.8"
+libc = "0.2"
+inkwell = { version = "0.5.0", features = ["llvm18-0"] }
