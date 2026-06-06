@@ -1,5 +1,12 @@
 # `stricc`
 
+[![CI](https://github.com/diegojromerolopez/stricc/actions/workflows/ci.yml/badge.svg)](https://github.com/diegojromerolopez/stricc/actions/workflows/ci.yml)
+[![C Language](https://img.shields.io/badge/C-00599C?style=flat-square&logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![C Standard](https://img.shields.io/badge/Standard-C23%2B-00599C?style=flat-square&logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C23_(C_standard_revision))
+[![LLVM Backend](https://img.shields.io/badge/LLVM-18-red?style=flat-square&logo=llvm&logoColor=white)](https://llvm.org/)
+[![Memory Safety](https://img.shields.io/badge/Memory--Safety-Guaranteed-success?style=flat-square)](https://github.com/diegojromerolopez/stricc)
+[![Compiler Written in Rust](https://img.shields.io/badge/Written%20in-Rust-black?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+
 A safe, drop-in compiler for a subset of the C programming language that completely eliminates **Undefined Behavior (UB)** at compile-time or via deterministic runtime traps.
 
 Written in Rust, utilizing LLVM (`inkwell`) for optimizing code generation, `stricc` is designed to bridge the gap between C's raw power and modern safety expectations.
@@ -25,12 +32,65 @@ Unlike standard compilers like GCC and Clang which exploit C's undefined behavio
 
 ---
 
-## Core Technologies
+## Safety in Action: Code Examples
 
-* **Shadow Metadata (SoftBound+CETS style)**: Retains standard 8-byte pointer layouts, ensuring full ABI, structure layout, and calling convention compatibility with GCC/Clang compiled code. This allows standard system headers (`<stdio.h>`) to be parsed directly and linked with system libraries.
-* **Link-Time Optimization (LTO)**: Compiles source code to LLVM bitcode and enables LTO by default. This permits global interprocedural analysis to prune redundant bounds and shadow check lookups.
-* **Value Range Propagation (VRP)**: Performs static analysis of loop induction variables and integer ranges to reject out-of-bound errors at compile-time and strip unnecessary runtime checks.
-* **Rust & LLVM**: Built in Rust for robust development, leveraging LLVM for state-of-the-art optimizer and target codegen.
+Here is how `stricc` protects standard C code from typical undefined behavior bugs:
+
+### 1. Spatial Bounds Violations (Stack Overflow / Out-of-Bounds)
+```c
+#include <stdio.h>
+
+void fail_bounds() {
+    int arr[5] = {1, 2, 3, 4, 5};
+    // GCC/Clang: Silently overwrites stack frames or local variables (highly exploitable)
+    // stricc: Catches the violation and cleanly aborts before memory corruption occurs
+    arr[10] = 42; 
+}
+```
+**`stricc` Runtime Output:**
+```ansi
+stricc: runtime check failed (Spatial Safety Bounds Violation)
+  Access: Write to 0x7ffd9a10bc28 (offset 40 bytes from base 0x7ffd9a10bc00)
+  Valid Range: 20 bytes [0x7ffd9a10bc00 to 0x7ffd9a10bc14]
+  At: fail_bounds (src/main.c:7:13)
+```
+
+### 2. Temporal Safety Violations (Use-After-Free)
+```c
+#include <stdlib.h>
+#include <stdio.h>
+
+void fail_uaf() {
+    int *ptr = malloc(sizeof(int) * 10);
+    ptr[0] = 100;
+    free(ptr);
+    // GCC/Clang: Accesses dangling memory, risking data corruption or double-free exploits
+    // stricc: Compares pointer metadata key with shadow allocation map and traps immediately
+    printf("%d\n", ptr[0]);
+}
+```
+**`stricc` Runtime Output:**
+```ansi
+stricc: runtime check failed (Temporal Safety Key Mismatch)
+  Access: Read from 0x55d0f110c200 (Use-After-Free or Double-Free)
+  At: fail_uaf (src/main.c:10:20)
+```
+
+---
+
+## Technical Architecture & ABI Compatibility
+
+One of the biggest concerns C developers have when using "Safe C" dialects (like Checked C) is **compatibility** and **performance overhead**. 
+
+### 1. Full ABI & Structure Layout Compatibility
+`stricc` maintains strict binary compatibility with GCC and Clang compiled code:
+* **Standard 8-Byte Pointers**: Pointers are physical 64-bit addresses, NOT fat structures. Struct layouts, field alignments, and function signatures remain identical to standard C.
+* **Link with Precompiled Libraries**: You can safely link object files compiled with `stricc` against precompiled libraries (such as `libz.a`, `sqlite3.o`, or standard system `libc`).
+* **Interoperable FFI**: Functions taking pointers can be passed to assembly or external libraries. `stricc` assigns "infinite" wildcard metadata bounds to pointers incoming from un-instrumented FFI boundaries.
+
+### 2. High-Performance Safety Optimization
+* **Value Range Propagation (VRP)**: `stricc` analyzes loop boundaries and index ranges statically. When an index can be mathematically proven to be safe, the compiler **suppresses the generation of runtime bounds checks**, achieving zero-overhead.
+* **Link-Time Optimization (LTO)**: Enabling LTO allows `stricc` to perform interprocedural analysis across compilation units, hoisting or pruning redundant shadow metadata accesses globally.
 
 ---
 
@@ -57,14 +117,26 @@ The `stricc` CLI mimics standard GCC flags:
 # Compile to an object file only (do not link)
 ./target/release/stricc -c -o helper.o helper.c
 
-# Output LLVM IR representation
-./target/release/stricc --emit-llvm -o main.ll main.c
-
-# Compile with macros and include paths
-./target/release/stricc -I./include -DDEBUG=1 -o app main.c
+# Compile with optimization level 3 and include headers
+./target/release/stricc -O3 -I./include -o app main.c
 ```
 
-### 4. Running Tests
+### 4. Build System Integration
+Since `stricc` mimics GCC flags, you can easily plug it into your existing build tools.
+
+#### Make / Autotools
+Simply override the `CC` compiler variable:
+```bash
+CC=stricc CFLAGS="-O3 -Wall" make
+```
+
+#### CMake
+Configure your CMake project to use `stricc` as the primary C compiler:
+```bash
+cmake -DCMAKE_C_COMPILER=/path/to/stricc ..
+```
+
+### 5. Running Tests
 Run the entire conformance and safety matrix test suite:
 ```bash
 # Run all workspace unit tests and integration tests
