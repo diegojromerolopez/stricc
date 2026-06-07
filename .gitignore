@@ -26,3 +26,7 @@ temp_test
 *.ll
 /dist/
 
+# Sphinx build directory
+docs/_build/
+
+
