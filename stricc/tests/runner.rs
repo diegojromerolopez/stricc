@@ -121,8 +121,26 @@ fn test_safety_matrix() {
             expected_abort: Some("Integer overflow detected"),
         },
         TestCase {
+            name: "overflow_sub",
+            file_path: "stricc/tests/safety/overflow_sub.c",
+            expected_error: None,
+            expected_abort: Some("Integer overflow detected"),
+        },
+        TestCase {
+            name: "overflow_mul",
+            file_path: "stricc/tests/safety/overflow_mul.c",
+            expected_error: None,
+            expected_abort: Some("Integer overflow detected"),
+        },
+        TestCase {
             name: "bounds",
             file_path: "stricc/tests/safety/bounds.c",
+            expected_error: None,
+            expected_abort: Some("Out-of-bounds pointer access"),
+        },
+        TestCase {
+            name: "null_deref",
+            file_path: "stricc/tests/safety/null_deref.c",
             expected_error: None,
             expected_abort: Some("Out-of-bounds pointer access"),
         },
@@ -157,3 +175,35 @@ fn test_safety_matrix() {
         run_test_case(case);
     }
 }
+
+#[test]
+fn test_defined_behavior() {
+    build_compiler();
+
+    let test_cases = vec![
+        TestCase {
+            name: "uninitialized_read",
+            file_path: "stricc/tests/defined/uninitialized_read.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "shift_mask",
+            file_path: "stricc/tests/defined/shift_mask.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "shift_constant_error",
+            file_path: "stricc/tests/defined/shift_constant_error.c",
+            expected_error: Some("Shift count 35 is out of bounds for type Int"),
+            expected_abort: None,
+        },
+    ];
+
+    for case in &test_cases {
+        println!("Running defined behavior test: {}", case.name);
+        run_test_case(case);
+    }
+}
+

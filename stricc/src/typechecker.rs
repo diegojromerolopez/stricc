@@ -415,6 +415,24 @@ impl Typechecker {
                     }
                     BinaryOp::Shl | BinaryOp::Shr => {
                         if left_ty.is_integer() && right_ty.is_integer() {
+                            if let ExprNode::Literal(Literal::Int(val)) = &right.node {
+                                let bit_width = match left_ty {
+                                    Type::Bool => 1,
+                                    Type::Char | Type::UnsignedChar => 8,
+                                    Type::Short | Type::UnsignedShort => 16,
+                                    Type::Int | Type::UnsignedInt => 32,
+                                    Type::Long | Type::UnsignedLong => 64,
+                                    _ => 32,
+                                };
+                                if *val < 0 || *val >= bit_width {
+                                    return Err(Diagnostic::error_with_span(
+                                        format!("Shift count {} is out of bounds for type {:?}", val, left_ty),
+                                        right.span,
+                                        "Out-of-bounds constant shift",
+                                        &self.filename,
+                                    ));
+                                }
+                            }
                             left_ty
                         } else {
                             return Err(Diagnostic::error_with_span(

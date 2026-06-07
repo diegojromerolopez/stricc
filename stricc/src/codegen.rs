@@ -491,33 +491,225 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     }
                     BinaryOp::Equal => {
                         let result = if left.ty.as_ref().unwrap().is_pointer() {
-                            self.builder.build_int_compare(IntPredicate::EQ, left_val.into_int_value(), right_val.into_int_value(), "eq").unwrap()
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::EQ, left_int, right_int, "eq").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, left_val.into_float_value(), right_val.into_float_value(), "eq").unwrap()
                         } else {
-                            self.builder.build_int_compare(IntPredicate::EQ, left_val.into_int_value(), right_val.into_int_value(), "eq").unwrap()
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            self.builder.build_int_compare(IntPredicate::EQ, left_int, right_int, "eq").unwrap()
                         };
                         result.into()
                     }
                     BinaryOp::NotEqual => {
-                        let result = self.builder.build_int_compare(IntPredicate::NE, left_val.into_int_value(), right_val.into_int_value(), "ne").unwrap();
+                        let result = if left.ty.as_ref().unwrap().is_pointer() {
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, left_int, right_int, "ne").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::UNE, left_val.into_float_value(), right_val.into_float_value(), "ne").unwrap()
+                        } else {
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            self.builder.build_int_compare(IntPredicate::NE, left_int, right_int, "ne").unwrap()
+                        };
                         result.into()
                     }
                     BinaryOp::Less => {
-                        let result = self.builder.build_int_compare(IntPredicate::SLT, left_val.into_int_value(), right_val.into_int_value(), "lt").unwrap();
+                        let result = if left.ty.as_ref().unwrap().is_pointer() {
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::ULT, left_int, right_int, "lt").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OLT, left_val.into_float_value(), right_val.into_float_value(), "lt").unwrap()
+                        } else {
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            let is_unsigned = matches!(left.ty.as_ref().unwrap(), Type::UnsignedInt | Type::UnsignedChar | Type::UnsignedShort | Type::UnsignedLong);
+                            let pred = if is_unsigned { IntPredicate::ULT } else { IntPredicate::SLT };
+                            self.builder.build_int_compare(pred, left_int, right_int, "lt").unwrap()
+                        };
                         result.into()
                     }
                     BinaryOp::LessEqual => {
-                        let result = self.builder.build_int_compare(IntPredicate::SLE, left_val.into_int_value(), right_val.into_int_value(), "le").unwrap();
+                        let result = if left.ty.as_ref().unwrap().is_pointer() {
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::ULE, left_int, right_int, "le").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OLE, left_val.into_float_value(), right_val.into_float_value(), "le").unwrap()
+                        } else {
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            let is_unsigned = matches!(left.ty.as_ref().unwrap(), Type::UnsignedInt | Type::UnsignedChar | Type::UnsignedShort | Type::UnsignedLong);
+                            let pred = if is_unsigned { IntPredicate::ULE } else { IntPredicate::SLE };
+                            self.builder.build_int_compare(pred, left_int, right_int, "le").unwrap()
+                        };
                         result.into()
                     }
                     BinaryOp::Greater => {
-                        let result = self.builder.build_int_compare(IntPredicate::SGT, left_val.into_int_value(), right_val.into_int_value(), "gt").unwrap();
+                        let result = if left.ty.as_ref().unwrap().is_pointer() {
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::UGT, left_int, right_int, "gt").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OGT, left_val.into_float_value(), right_val.into_float_value(), "gt").unwrap()
+                        } else {
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            let is_unsigned = matches!(left.ty.as_ref().unwrap(), Type::UnsignedInt | Type::UnsignedChar | Type::UnsignedShort | Type::UnsignedLong);
+                            let pred = if is_unsigned { IntPredicate::UGT } else { IntPredicate::SGT };
+                            self.builder.build_int_compare(pred, left_int, right_int, "gt").unwrap()
+                        };
                         result.into()
                     }
                     BinaryOp::GreaterEqual => {
-                        let result = self.builder.build_int_compare(IntPredicate::SGE, left_val.into_int_value(), right_val.into_int_value(), "ge").unwrap();
+                        let result = if left.ty.as_ref().unwrap().is_pointer() {
+                            let left_int = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            let right_int = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::UGE, left_int, right_int, "ge").unwrap()
+                        } else if left.ty.as_ref().unwrap().is_floating() {
+                            self.builder.build_float_compare(inkwell::FloatPredicate::OGE, left_val.into_float_value(), right_val.into_float_value(), "ge").unwrap()
+                        } else {
+                            let left_promoted = self.promote_to_c_arithmetic(left_val, left.ty.as_ref().unwrap());
+                            let right_promoted = self.promote_to_c_arithmetic(right_val, right.ty.as_ref().unwrap());
+                            let (left_int, right_int) = self.promote_integers(
+                                left_promoted,
+                                self.is_signed_type(left.ty.as_ref().unwrap()),
+                                right_promoted,
+                                self.is_signed_type(right.ty.as_ref().unwrap()),
+                            );
+                            let is_unsigned = matches!(left.ty.as_ref().unwrap(), Type::UnsignedInt | Type::UnsignedChar | Type::UnsignedShort | Type::UnsignedLong);
+                            let pred = if is_unsigned { IntPredicate::UGE } else { IntPredicate::SGE };
+                            self.builder.build_int_compare(pred, left_int, right_int, "ge").unwrap()
+                        };
                         result.into()
                     }
-                    _ => left_val, // Fallback for bitwise / logical in this simple prototype
+                    BinaryOp::Shl => {
+                        let left_int = left_val.into_int_value();
+                        let right_int = right_val.into_int_value();
+                        let bit_width = left_int.get_type().get_bit_width();
+                        let mask = right_int.get_type().const_int((bit_width - 1) as u64, false);
+                        let masked_right_orig = self.builder.build_and(right_int, mask, "masked_shift_orig").unwrap();
+                        
+                        let masked_right = if right_int.get_type().get_bit_width() > bit_width {
+                            self.builder.build_int_truncate(masked_right_orig, left_int.get_type(), "masked_shift_trunc").unwrap()
+                        } else if right_int.get_type().get_bit_width() < bit_width {
+                            self.builder.build_int_z_extend(masked_right_orig, left_int.get_type(), "masked_shift_extend").unwrap()
+                        } else {
+                            masked_right_orig
+                        };
+                        
+                        self.builder.build_left_shift(left_int, masked_right, "shl").unwrap().into()
+                    }
+                    BinaryOp::Shr => {
+                        let left_int = left_val.into_int_value();
+                        let right_int = right_val.into_int_value();
+                        let bit_width = left_int.get_type().get_bit_width();
+                        let mask = right_int.get_type().const_int((bit_width - 1) as u64, false);
+                        let masked_right_orig = self.builder.build_and(right_int, mask, "masked_shift_orig").unwrap();
+                        
+                        let masked_right = if right_int.get_type().get_bit_width() > bit_width {
+                            self.builder.build_int_truncate(masked_right_orig, left_int.get_type(), "masked_shift_trunc").unwrap()
+                        } else if right_int.get_type().get_bit_width() < bit_width {
+                            self.builder.build_int_z_extend(masked_right_orig, left_int.get_type(), "masked_shift_extend").unwrap()
+                        } else {
+                            masked_right_orig
+                        };
+                        
+                        let is_signed = match left.ty.as_ref().unwrap() {
+                            Type::Char | Type::Int | Type::Short | Type::Long => true,
+                            _ => false,
+                        };
+                        self.builder.build_right_shift(left_int, masked_right, is_signed, "shr").unwrap().into()
+                    }
+                    BinaryOp::BitAnd => {
+                        let left_int = left_val.into_int_value();
+                        let right_int = right_val.into_int_value();
+                        self.builder.build_and(left_int, right_int, "and").unwrap().into()
+                    }
+                    BinaryOp::BitOr => {
+                        let left_int = left_val.into_int_value();
+                        let right_int = right_val.into_int_value();
+                        self.builder.build_or(left_int, right_int, "or").unwrap().into()
+                    }
+                    BinaryOp::BitXor => {
+                        let left_int = left_val.into_int_value();
+                        let right_int = right_val.into_int_value();
+                        self.builder.build_xor(left_int, right_int, "xor").unwrap().into()
+                    }
+                    BinaryOp::LogicalAnd => {
+                        let left_bool = if left_val.is_pointer_value() {
+                            let int_val = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_null").unwrap()
+                        } else {
+                            let int_val = left_val.into_int_value();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_zero").unwrap()
+                        };
+                        
+                        let right_bool = if right_val.is_pointer_value() {
+                            let int_val = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_null").unwrap()
+                        } else {
+                            let int_val = right_val.into_int_value();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_zero").unwrap()
+                        };
+                        
+                        let res_i1 = self.builder.build_and(left_bool, right_bool, "land").unwrap();
+                        self.builder.build_int_z_extend(res_i1, self.context.i32_type(), "land_cast").unwrap().into()
+                    }
+                    BinaryOp::LogicalOr => {
+                        let left_bool = if left_val.is_pointer_value() {
+                            let int_val = self.builder.build_ptr_to_int(left_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_null").unwrap()
+                        } else {
+                            let int_val = left_val.into_int_value();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_zero").unwrap()
+                        };
+                        
+                        let right_bool = if right_val.is_pointer_value() {
+                            let int_val = self.builder.build_ptr_to_int(right_val.into_pointer_value(), self.context.i64_type(), "ptr_cast").unwrap();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_null").unwrap()
+                        } else {
+                            let int_val = right_val.into_int_value();
+                            self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_zero").unwrap()
+                        };
+                        
+                        let res_i1 = self.builder.build_or(left_bool, right_bool, "lor").unwrap();
+                        self.builder.build_int_z_extend(res_i1, self.context.i32_type(), "lor_cast").unwrap().into()
+                    }
                 }
             }
             ExprNode::Unary(op, inner) => {
@@ -795,5 +987,64 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.position_at_end(cont_bb);
 
         val
+    }
+
+    fn is_signed_type(&self, ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Char
+                | Type::Int
+                | Type::Short
+                | Type::Long
+        )
+    }
+
+    fn promote_to_c_arithmetic(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        ty: &Type,
+    ) -> IntValue<'ctx> {
+        let int_val = val.into_int_value();
+        let width = int_val.get_type().get_bit_width();
+        let signed = self.is_signed_type(ty);
+        
+        if width < 32 {
+            if signed {
+                self.builder.build_int_s_extend(int_val, self.context.i32_type(), "promote_32").unwrap()
+            } else {
+                self.builder.build_int_z_extend(int_val, self.context.i32_type(), "promote_32").unwrap()
+            }
+        } else {
+            int_val
+        }
+    }
+
+    fn promote_integers(
+        &self,
+        left: IntValue<'ctx>,
+        left_signed: bool,
+        right: IntValue<'ctx>,
+        right_signed: bool,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let left_width = left.get_type().get_bit_width();
+        let right_width = right.get_type().get_bit_width();
+        
+        if left_width < right_width {
+            let promoted_left = if left_signed {
+                self.builder.build_int_s_extend(left, right.get_type(), "promote_left").unwrap()
+            } else {
+                self.builder.build_int_z_extend(left, right.get_type(), "promote_left").unwrap()
+            };
+            (promoted_left, right)
+        } else if left_width > right_width {
+            let promoted_right = if right_signed {
+                self.builder.build_int_s_extend(right, left.get_type(), "promote_right").unwrap()
+            } else {
+                self.builder.build_int_z_extend(right, left.get_type(), "promote_right").unwrap()
+            };
+            (left, promoted_right)
+        } else {
+            (left, right)
+        }
     }
 }
