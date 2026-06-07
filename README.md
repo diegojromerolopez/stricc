@@ -1,6 +1,7 @@
 # `stricc`
 
 [![CI](https://github.com/diegojromerolopez/stricc/actions/workflows/ci.yml/badge.svg)](https://github.com/diegojromerolopez/stricc/actions/workflows/ci.yml)
+[![Documentation Status](https://readthedocs.org/projects/stricc/badge/?version=latest)](https://stricc.readthedocs.io/en/latest/?badge=latest)
 [![C Language](https://img.shields.io/badge/C-00599C?style=flat-square&logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![C Standard](https://img.shields.io/badge/Standard-C23%2B-00599C?style=flat-square&logo=c&logoColor=white)](https://en.wikipedia.org/wiki/C23_(C_standard_revision))
 [![LLVM Backend](https://img.shields.io/badge/LLVM-18-red?style=flat-square&logo=llvm&logoColor=white)](https://llvm.org/)
@@ -12,7 +13,7 @@ A safe, drop-in compiler for a subset of the C programming language that complet
 Written in Rust, utilizing LLVM (`inkwell`) for optimizing code generation, `stricc` is designed to bridge the gap between C's raw power and modern safety expectations.
 
 > [!NOTE]
-> Read the full architectural specifications and implementation details in [PLAN.md](file:///Users/diegoj/repos/stricc/PLAN.md).
+> Read the online documentation on [Read the Docs](https://stricc.readthedocs.io/en/latest/) or review the full architectural specifications and implementation details in [PLAN.md](file:///Users/diegoj/repos/stricc/PLAN.md).
 
 ---
 
@@ -95,6 +96,9 @@ One of the biggest concerns C developers have when using "Safe C" dialects (like
 ---
 
 ## Getting Started & Usage
+
+> [!TIP]
+> For the full list of compiler flags, detailed usage tutorials, and advanced compiler configurations, visit the [stricc CLI Usage & Integration Guide](https://stricc.readthedocs.io/en/latest/cli_usage.html) on Read the Docs.
 
 ### 1. Prerequisites
 `stricc` requires **LLVM 18** to compile and run.

@@ -1,0 +1,352 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Undefined Behavior Mitigation &amp; Examples &mdash; stricc 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Differences with GCC / Clang" href="differences.html" />
+    <link rel="prev" title="CLI Usage &amp; Integration Guide" href="cli_usage.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            stricc
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="cli_usage.html">CLI Usage &amp; Integration Guide</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Undefined Behavior Mitigation &amp; Examples</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#spatial-bounds-violations-out-of-bounds-access">1. Spatial Bounds Violations (Out-of-Bounds Access)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#stricc-mitigation"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#code-example">Code Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#stricc-abort-diagnostics"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#temporal-safety-violations-use-after-free">2. Temporal Safety Violations (Use-After-Free)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id1"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id2">Code Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id3"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#integer-division-by-zero">3. Integer Division by Zero</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id4"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id5">Code Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id6"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#signed-integer-overflow">4. Signed Integer Overflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id7"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id8">Code Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#reading-uninitialized-variables">5. Reading Uninitialized Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id9"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id10">Code Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#out-of-bounds-bit-shifts">6. Out-of-Bounds Bit Shifts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id11"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id12">Code Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#reaching-end-of-non-void-function-without-return">7. Reaching End of Non-Void Function without Return</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id13"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id14">Code Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#stack-variable-escapes-stack-use-after-free">8. Stack Variable Escapes (Stack Use-After-Free)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id15"><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id16">Code Example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="differences.html">Differences with GCC / Clang</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">stricc</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Undefined Behavior Mitigation &amp; Examples</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/ub_mitigation.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="undefined-behavior-mitigation-examples">
+<h1>Undefined Behavior Mitigation &amp; Examples<a class="headerlink" href="#undefined-behavior-mitigation-examples" title="Link to this heading"></a></h1>
+<p>Standard C compilers (like GCC and Clang) treat <strong>Undefined Behavior (UB)</strong> as opportunities for aggressive optimizations. They assume that UB never occurs in a program, and can optimize away safety checks, branch conditions, or entire functions if they contain UB.</p>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> takes the opposite approach: <strong>all Undefined Behavior is eliminated</strong>. It is either statically checked and rejected at compile-time, defined cleanly to have deterministic behavior, or guarded by runtime checks that trap/abort execution before memory corruption or invalid calculations can occur.</p>
+<p>Below is a detailed analysis of major undefined behaviors in standard C and how <code class="docutils literal notranslate"><span class="pre">stricc</span></code> turns them into safe, defined outcomes, along with code examples.</p>
+<hr class="docutils" />
+<section id="spatial-bounds-violations-out-of-bounds-access">
+<h2>1. Spatial Bounds Violations (Out-of-Bounds Access)<a class="headerlink" href="#spatial-bounds-violations-out-of-bounds-access" title="Link to this heading"></a></h2>
+<p>In standard C, reading or writing outside the bounds of an array is undefined. It silently corrupts memory (stack variables, heap structures, or function return addresses), which is the primary cause of buffer overflow exploits.</p>
+<section id="stricc-mitigation">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#stricc-mitigation" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> maintains standard 8-byte pointer compatibility but maps pointer values to a decoupled <strong>Shadow Metadata Table</strong> containing <code class="docutils literal notranslate"><span class="pre">(base,</span> <span class="pre">size,</span> <span class="pre">key)</span></code> bounds. Every pointer dereference is instrumented with dynamic checks ensuring <code class="docutils literal notranslate"><span class="pre">ptr</span> <span class="pre">&gt;=</span> <span class="pre">base</span></code> and <code class="docutils literal notranslate"><span class="pre">ptr</span> <span class="pre">+</span> <span class="pre">size_of_access</span> <span class="pre">&lt;=</span> <span class="pre">base</span> <span class="pre">+</span> <span class="pre">size</span></code>.</p>
+</section>
+<section id="code-example">
+<h3>Code Example<a class="headerlink" href="#code-example" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">fail_bounds</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">arr</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="p">};</span>
+<span class="w">    </span><span class="c1">// GCC/Clang: Silently overwrites stack frames (dangerous)</span>
+<span class="w">    </span><span class="c1">// stricc: Detects the out-of-bounds offset and aborts immediately</span>
+<span class="w">    </span><span class="n">arr</span><span class="p">[</span><span class="mi">10</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="stricc-abort-diagnostics">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics<a class="headerlink" href="#stricc-abort-diagnostics" title="Link to this heading"></a></h3>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>stricc: runtime check failed (Spatial Safety Bounds Violation)
+  Access: Write to 0x7ffd9a10bc28 (offset 40 bytes from base 0x7ffd9a10bc00)
+  Valid Range: 20 bytes [0x7ffd9a10bc00 to 0x7ffd9a10bc14]
+  At: fail_bounds (src/main.c:7:13)
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="temporal-safety-violations-use-after-free">
+<h2>2. Temporal Safety Violations (Use-After-Free)<a class="headerlink" href="#temporal-safety-violations-use-after-free" title="Link to this heading"></a></h2>
+<p>Once heap memory is released via <code class="docutils literal notranslate"><span class="pre">free()</span></code>, access to that address (dangling pointer) is undefined in C. Standard compilers may reallocate the block, leading to silent data leaks or remote code execution.</p>
+<section id="id1">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<p>Every heap allocation generates a unique 64-bit version key stored in a global <strong>Shadow Key Map</strong>. The allocated pointer’s metadata contains this key. On pointer dereference or deallocation, the key in the pointer’s metadata is checked against the global allocation map. When <code class="docutils literal notranslate"><span class="pre">free()</span></code> is called, the key is revoked. Any subsequent access fails.</p>
+</section>
+<section id="id2">
+<h3>Code Example<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdlib.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">fail_uaf</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">10</span><span class="p">);</span>
+<span class="w">    </span><span class="n">ptr</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// GCC/Clang: Accesses dangling memory, leading to potential exploits</span>
+<span class="w">    </span><span class="c1">// stricc: Compares pointer key with shadow map and traps instantly</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">ptr</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="id3">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics<a class="headerlink" href="#id3" title="Link to this heading"></a></h3>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>stricc: runtime check failed (Temporal Safety Key Mismatch)
+  Access: Read from 0x55d0f110c200 (Use-After-Free or Double-Free)
+  At: fail_uaf (src/main.c:10:20)
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="integer-division-by-zero">
+<h2>3. Integer Division by Zero<a class="headerlink" href="#integer-division-by-zero" title="Link to this heading"></a></h2>
+<p>Dividing or modulo-ing an integer by zero is undefined in C, often resulting in hard CPU crashes (e.g., <code class="docutils literal notranslate"><span class="pre">SIGFPE</span></code> signals) or unpredictable optimizer assumptions.</p>
+<section id="id4">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id4" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> inserts a safety comparison check before every division or modulo instruction. If the divisor evaluates to <code class="docutils literal notranslate"><span class="pre">0</span></code>, the compiler branches to the runtime abort routine, printing a symbolicated traceback.</p>
+</section>
+<section id="id5">
+<h3>Code Example<a class="headerlink" href="#id5" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">divide</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// b = 0 will trigger the division safety check trap</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">b</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="id6">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Abort Diagnostics<a class="headerlink" href="#id6" title="Link to this heading"></a></h3>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>stricc: runtime check failed (Division/Modulo by Zero)
+  Attempted to divide by zero in function &#39;divide&#39;
+  At: src/math.c:3:12
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="signed-integer-overflow">
+<h2>4. Signed Integer Overflow<a class="headerlink" href="#signed-integer-overflow" title="Link to this heading"></a></h2>
+<p>In standard C, signed integer overflow is undefined (e.g., adding <code class="docutils literal notranslate"><span class="pre">1</span></code> to <code class="docutils literal notranslate"><span class="pre">INT_MAX</span></code>). Standard compilers exploit this to optimize away checks like <code class="docutils literal notranslate"><span class="pre">x</span> <span class="pre">+</span> <span class="pre">1</span> <span class="pre">&gt;</span> <span class="pre">x</span></code> to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
+<section id="id7">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id7" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> compiles signed arithmetic operations using LLVM overflow-checking intrinsics (e.g., <code class="docutils literal notranslate"><span class="pre">&#64;llvm.sadd.with.overflow</span></code>). If an overflow flag is raised, it traps immediately at runtime. Unsigned arithmetic overflows are defined to wrap cleanly using two’s complement modulo behavior.</p>
+</section>
+<section id="id8">
+<h3>Code Example<a class="headerlink" href="#id8" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;limits.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">overflow_check</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">INT_MAX</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// stricc: Traps at runtime instead of wrapping or optimizing out the addition</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">max</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="reading-uninitialized-variables">
+<h2>5. Reading Uninitialized Variables<a class="headerlink" href="#reading-uninitialized-variables" title="Link to this heading"></a></h2>
+<p>Reading uninitialized local or heap variables in C yields stack/heap garbage, causing information disclosure, logic bugs, or undefined compiler pathways.</p>
+<section id="id9">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id9" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> automatically initializes all local variables, globals, pointers, and structs to zero-filled default states (e.g., integers to <code class="docutils literal notranslate"><span class="pre">0</span></code>, pointers to <code class="docutils literal notranslate"><span class="pre">nullptr</span></code>, character arrays to empty string structures) at declaration. If <strong>Definite Assignment Analysis</strong> proves a variable is always written to before it is read, this initialization is optimized away.</p>
+</section>
+<section id="id10">
+<h3>Code Example<a class="headerlink" href="#id10" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_value</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="c1">// Uninitialized in standard C</span>
+<span class="w">    </span><span class="c1">// GCC/Clang: Prints random stack garbage</span>
+<span class="w">    </span><span class="c1">// stricc: Guarantees x is zero-initialized and prints 0</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">x</span><span class="p">);</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="out-of-bounds-bit-shifts">
+<h2>6. Out-of-Bounds Bit Shifts<a class="headerlink" href="#out-of-bounds-bit-shifts" title="Link to this heading"></a></h2>
+<p>Shifting an integer by a negative number or by a count equal to or greater than its bit-width (e.g., shifting a 32-bit integer by 35) is undefined in C.</p>
+<section id="id11">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id11" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> mask-limits all dynamic shift amounts. For a 32-bit integer, the shift count is masked with <code class="docutils literal notranslate"><span class="pre">31</span></code> (i.e., <code class="docutils literal notranslate"><span class="pre">shift_count</span> <span class="pre">&amp;</span> <span class="pre">31</span></code>), turning out-of-bounds shifts into deterministic modulo shifts. If the shift count is a constant, out-of-bounds values are caught at compile-time.</p>
+</section>
+<section id="id12">
+<h3>Code Example<a class="headerlink" href="#id12" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">shift_modulo</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">val</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If count = 35, standard C is undefined.</span>
+<span class="w">    </span><span class="c1">// stricc performs: val &lt;&lt; (35 &amp; 31) -&gt; val &lt;&lt; 3</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">val</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="reaching-end-of-non-void-function-without-return">
+<h2>7. Reaching End of Non-Void Function without Return<a class="headerlink" href="#reaching-end-of-non-void-function-without-return" title="Link to this heading"></a></h2>
+<p>If execution flows to the closing brace of a value-returning function without returning a value, calling it and using its value is undefined.</p>
+<section id="id13">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id13" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> performs strict <strong>Definite Return Analysis</strong> on the AST. If any control-flow path can exit a non-void function without a <code class="docutils literal notranslate"><span class="pre">return</span></code> statement or a diverging call (like <code class="docutils literal notranslate"><span class="pre">exit</span></code> or <code class="docutils literal notranslate"><span class="pre">abort</span></code>), compile-time analysis rejects the program.</p>
+</section>
+<section id="id14">
+<h3>Code Example<a class="headerlink" href="#id14" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">fail_return</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// GCC/Clang: Compiles with a warning, returning garbage if x &lt;= 10.</span>
+<span class="w">    </span><span class="c1">// stricc: Fails to compile: &quot;error: control path reaches end of non-void function&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="stack-variable-escapes-stack-use-after-free">
+<h2>8. Stack Variable Escapes (Stack Use-After-Free)<a class="headerlink" href="#stack-variable-escapes-stack-use-after-free" title="Link to this heading"></a></h2>
+<p>Returning the address of a local variable or assigning it to a pointer declared in an outer scope creates a dangling stack reference. Accessing it after the scope exits is undefined.</p>
+<section id="id15">
+<h3><code class="docutils literal notranslate"><span class="pre">stricc</span></code> Mitigation<a class="headerlink" href="#id15" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">stricc</span></code> performs static compile-time <strong>Lifetime &amp; Escape Analysis</strong>. The compiler tracks lexical scopes and rejects any attempt to pass or assign stack-allocated addresses to a reference that outlives them.</p>
+</section>
+<section id="id16">
+<h3>Code Example<a class="headerlink" href="#id16" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="nf">fail_escape</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">temp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// stricc: Statically rejects compilation</span>
+<span class="w">    </span><span class="c1">// &quot;error: reference to stack variable &#39;temp&#39; escapes scope&quot;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="n">temp</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="cli_usage.html" class="btn btn-neutral float-left" title="CLI Usage &amp; Integration Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="differences.html" class="btn btn-neutral float-right" title="Differences with GCC / Clang" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
