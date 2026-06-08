@@ -169,6 +169,12 @@ fn test_safety_matrix() {
             expected_abort: None,
         },
         TestCase {
+            name: "forbidden_redefine",
+            file_path: "stricc/tests/safety/forbidden_redefine.c",
+            expected_error: Some("Redefining keyword 'int' as a macro is forbidden in Safe C mode"),
+            expected_abort: None,
+        },
+        TestCase {
             name: "float_overflow",
             file_path: "stricc/tests/safety/float_overflow.c",
             expected_error: None,

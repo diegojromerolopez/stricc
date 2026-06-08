@@ -33,9 +33,12 @@ impl Driver {
             return Err(format!("Input file '{}' does not exist", self.options.input_file));
         }
 
-        // Check for forbidden constructs
+        // Check for forbidden constructs and keyword redefinitions
         let raw_content = fs::read_to_string(input_path)
             .map_err(|e| format!("Failed to read input file: {}", e))?;
+        
+        check_keyword_redefinitions(&raw_content)?;
+
         if raw_content.contains("#include <setjmp.h>") {
             return Err("Header <setjmp.h> is forbidden in Safe C mode".to_string());
         }
@@ -47,7 +50,7 @@ impl Driver {
         }
 
         // 1. Preprocess using host Clang
-        let mut preprocessed_temp = tempfile::Builder::new()
+        let preprocessed_temp = tempfile::Builder::new()
             .suffix(".i")
             .tempfile()
             .map_err(|e| format!("Failed to create temporary file: {}", e))?;
@@ -114,7 +117,7 @@ impl Driver {
 
         // 6. Write output
         let ir_str = module.print_to_string().to_string();
-        let mut ll_temp = tempfile::Builder::new()
+        let ll_temp = tempfile::Builder::new()
             .suffix(".ll")
             .tempfile()
             .map_err(|e| format!("Failed to create temporary LLVM IR file: {}", e))?;
@@ -233,4 +236,80 @@ impl Driver {
 
         Ok(())
     }
+}
+
+fn strip_line_continuations(content: &str) -> String {
+    content.replace("\\\r\n", "").replace("\\\n", "")
+}
+
+fn strip_comments(content: &str) -> String {
+    let mut result = String::new();
+    let mut chars = content.chars().peekable();
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    
+    while let Some(c) = chars.next() {
+        if in_line_comment {
+            if c == '\n' {
+                in_line_comment = false;
+                result.push('\n');
+            }
+        } else if in_block_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+                result.push(' '); // Replacing block comment with a space
+            }
+        } else {
+            if c == '/' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+            } else if c == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+            } else {
+                result.push(c);
+            }
+        }
+    }
+    result
+}
+
+fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
+    let spliced = strip_line_continuations(content);
+    let stripped = strip_comments(&spliced);
+    
+    const KEYWORDS: &[&str] = &[
+        "int", "char", "float", "double", "short", "long", "unsigned", "signed", "void",
+        "struct", "union", "enum", "const", "auto", "nullptr", "constexpr", "typeof",
+        "bool", "true", "false", "if", "else", "while", "for", "switch", "case", "default",
+        "break", "continue", "return", "sizeof", "alignof", "_Atomic", "__unsafe", "restrict"
+    ];
+
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            // Extract the rest of the directive
+            let rest = trimmed[1..].trim();
+            if rest.starts_with("define") {
+                let rest_define = rest["define".len()..].trim();
+                // Extract the identifier name
+                let mut macro_name = String::new();
+                for c in rest_define.chars() {
+                    if c.is_alphanumeric() || c == '_' {
+                        macro_name.push(c);
+                    } else {
+                        break;
+                    }
+                }
+                if !macro_name.is_empty() && KEYWORDS.contains(&macro_name.as_str()) {
+                    return Err(format!(
+                        "Redefining keyword '{}' as a macro is forbidden in Safe C mode",
+                        macro_name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
