@@ -151,6 +151,17 @@ impl Typechecker {
                 for param in &mut f.params {
                     self.check_type(&mut param.ty, f.span)?;
                 }
+
+                // Reject user-defined variadic function bodies (external libc declarations are fine)
+                if f.is_variadic && f.body.is_some() {
+                    return Err(Diagnostic::error_with_span(
+                        format!("User-defined variadic function '{}' is forbidden in Safe C mode; only external variadic declarations (e.g. printf) are allowed", f.name),
+                        f.span,
+                        "Forbidden user-defined variadic".to_string(),
+                        &self.filename,
+                    ));
+                }
+
                 self.variables.enter_scope();
                 self.local_vars.enter_scope();
                 self.scope_depth = 1;
@@ -668,13 +679,6 @@ impl Typechecker {
                                     if let ExprNode::Literal(Literal::String(fmt)) = &args[fmt_arg_idx].node {
                                         let fmt_str = fmt.clone();
                                         self.validate_format_string(&fmt_str, args, fmt_arg_idx, expr.span)?;
-                                    } else {
-                                        return Err(Diagnostic::error_with_span(
-                                            "Format string argument must be a compile-time string literal to prevent exploits".to_string(),
-                                            args[fmt_arg_idx].span,
-                                            "Format string validation".to_string(),
-                                            &self.filename,
-                                        ));
                                     }
                                 }
                             }
@@ -741,6 +745,15 @@ impl Typechecker {
                         "Casting integer to pointer is disallowed in Safe C mode by default",
                         expr.span,
                         "Unsafe integer-to-pointer cast".to_string(),
+                        &self.filename,
+                    ));
+                }
+                // Casting pointer to integer loses bounds metadata and is disallowed
+                if inner_ty.is_pointer() && cast_ty.is_integer() {
+                    return Err(Diagnostic::error_with_span(
+                        "Casting pointer to integer is disallowed in Safe C mode (use uintptr_t via unsafe block if strictly necessary)",
+                        expr.span,
+                        "Unsafe pointer-to-integer cast".to_string(),
                         &self.filename,
                     ));
                 }
@@ -823,7 +836,38 @@ impl Typechecker {
         };
 
         expr.ty = Some(ty.clone());
+        self.check_static_bounds(expr)?;
+        self.check_sequence_points(expr)?;
         Ok(ty)
+    }
+
+    fn check_static_bounds(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        if let ExprNode::Unary(UnaryOp::Deref, inner) = &expr.node {
+            if let ExprNode::Binary(BinaryOp::Add, left, right) = &inner.node {
+                let check_array_index = |arr_expr: &Expr, idx_expr: &Expr| -> Result<(), Diagnostic> {
+                    if let ExprNode::Identifier(name) = &arr_expr.node {
+                        if let Some(ty) = self.variables.lookup(name) {
+                            if let Type::Array(_, ArraySize::Const(len)) = ty {
+                                if let ExprNode::Literal(Literal::Int(idx_val)) = &idx_expr.node {
+                                    if *idx_val < 0 || *idx_val as usize >= len {
+                                        return Err(Diagnostic::error_with_span(
+                                            format!("Static out-of-bounds array access: index {} is out of bounds for array '{}' of size {}", idx_val, name, len),
+                                            expr.span,
+                                            "Array index out of bounds".to_string(),
+                                            &self.filename,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+                check_array_index(left, right)?;
+                check_array_index(right, left)?;
+            }
+        }
+        Ok(())
     }
 
     fn is_lvalue(&self, expr: &Expr) -> bool {
@@ -1088,4 +1132,186 @@ impl Typechecker {
             _ => ty,
         }
     }
+
+    fn check_sequence_points(&self, expr: &Expr) -> Result<(), Diagnostic> {
+        self.get_effects(expr)?;
+        Ok(())
+    }
+
+    fn check_conflicts(
+        &self,
+        span: Span,
+        left_reads: &HashSet<String>,
+        left_writes: &HashSet<String>,
+        right_reads: &HashSet<String>,
+        right_writes: &HashSet<String>,
+    ) -> Result<(), Diagnostic> {
+        for w in left_writes {
+            if right_writes.contains(w) {
+                return Err(Diagnostic::error_with_span(
+                    format!("Sequence point violation: variable '{}' is modified twice without a sequence point", w),
+                    span,
+                    "Double write to variable".to_string(),
+                    &self.filename,
+                ));
+            }
+            if right_reads.contains(w) {
+                return Err(Diagnostic::error_with_span(
+                    format!("Sequence point violation: variable '{}' is modified and read without a sequence point", w),
+                    span,
+                    "Read-write conflict on variable".to_string(),
+                    &self.filename,
+                ));
+            }
+        }
+        for w in right_writes {
+            if left_reads.contains(w) {
+                return Err(Diagnostic::error_with_span(
+                    format!("Sequence point violation: variable '{}' is modified and read without a sequence point", w),
+                    span,
+                    "Read-write conflict on variable".to_string(),
+                    &self.filename,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn get_effects(&self, expr: &Expr) -> Result<ExprEffects, Diagnostic> {
+        match &expr.node {
+            ExprNode::Literal(_) => Ok(ExprEffects {
+                reads: HashSet::new(),
+                writes: HashSet::new(),
+            }),
+            ExprNode::Identifier(name) => {
+                let mut reads = HashSet::new();
+                reads.insert(name.clone());
+                Ok(ExprEffects {
+                    reads,
+                    writes: HashSet::new(),
+                })
+            }
+            ExprNode::Unary(op, inner) => {
+                let inner_eff = self.get_effects(inner)?;
+                match op {
+                    UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => {
+                        let mut writes = inner_eff.writes.clone();
+                        let mut reads = inner_eff.reads.clone();
+                        if let ExprNode::Identifier(name) = &inner.node {
+                            writes.insert(name.clone());
+                            reads.remove(name);
+                        }
+                        Ok(ExprEffects { reads, writes })
+                    }
+                    _ => Ok(inner_eff),
+                }
+            }
+            ExprNode::Binary(op, left, right) => {
+                let left_eff = self.get_effects(left)?;
+                let right_eff = self.get_effects(right)?;
+                if *op == BinaryOp::LogicalAnd || *op == BinaryOp::LogicalOr {
+                    let mut reads = left_eff.reads.clone();
+                    reads.extend(right_eff.reads.clone());
+                    let mut writes = left_eff.writes.clone();
+                    writes.extend(right_eff.writes.clone());
+                    Ok(ExprEffects { reads, writes })
+                } else {
+                    self.check_conflicts(
+                        expr.span,
+                        &left_eff.reads,
+                        &left_eff.writes,
+                        &right_eff.reads,
+                        &right_eff.writes,
+                    )?;
+                    let mut reads = left_eff.reads.clone();
+                    reads.extend(right_eff.reads.clone());
+                    let mut writes = left_eff.writes.clone();
+                    writes.extend(right_eff.writes.clone());
+                    Ok(ExprEffects { reads, writes })
+                }
+            }
+            ExprNode::Assign(left, right) => {
+                if let ExprNode::Identifier(name) = &left.node {
+                    let right_eff = self.get_effects(right)?;
+                    if right_eff.writes.contains(name) {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Sequence point violation: variable '{}' is modified twice without a sequence point", name),
+                            expr.span,
+                            "Double write to variable".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                    let mut writes = right_eff.writes.clone();
+                    writes.insert(name.clone());
+                    Ok(ExprEffects {
+                        reads: right_eff.reads.clone(),
+                        writes,
+                    })
+                } else {
+                    let left_eff = self.get_effects(left)?;
+                    let right_eff = self.get_effects(right)?;
+                    self.check_conflicts(
+                        expr.span,
+                        &left_eff.reads,
+                        &left_eff.writes,
+                        &right_eff.reads,
+                        &right_eff.writes,
+                    )?;
+                    let mut reads = left_eff.reads.clone();
+                    reads.extend(right_eff.reads.clone());
+                    let mut writes = left_eff.writes.clone();
+                    writes.extend(right_eff.writes.clone());
+                    Ok(ExprEffects { reads, writes })
+                }
+            }
+            ExprNode::Call(callee, args) => {
+                let callee_eff = self.get_effects(callee)?;
+                let mut args_eff = Vec::new();
+                for arg in args {
+                    args_eff.push(self.get_effects(arg)?);
+                }
+                for arg_eff in &args_eff {
+                    self.check_conflicts(
+                        expr.span,
+                        &callee_eff.reads,
+                        &callee_eff.writes,
+                        &arg_eff.reads,
+                        &arg_eff.writes,
+                    )?;
+                }
+                for i in 0..args_eff.len() {
+                    for j in (i + 1)..args_eff.len() {
+                        self.check_conflicts(
+                            expr.span,
+                            &args_eff[i].reads,
+                            &args_eff[i].writes,
+                            &args_eff[j].reads,
+                            &args_eff[j].writes,
+                        )?;
+                    }
+                }
+                let mut reads = callee_eff.reads.clone();
+                let mut writes = callee_eff.writes.clone();
+                for arg_eff in args_eff {
+                    reads.extend(arg_eff.reads);
+                    writes.extend(arg_eff.writes);
+                }
+                Ok(ExprEffects { reads, writes })
+            }
+            ExprNode::Cast(_, inner) => self.get_effects(inner),
+            ExprNode::Member(inner, _, _) => self.get_effects(inner),
+            ExprNode::SizeofExpr(_)
+            | ExprNode::SizeofType(_)
+            | ExprNode::AlignofExpr(_)
+            | ExprNode::AlignofType(_) => Ok(ExprEffects {
+                reads: HashSet::new(),
+                writes: HashSet::new(),
+            }),
+        }
+    }
+}
+
+struct ExprEffects {
+    reads: HashSet<String>,
+    writes: HashSet<String>,
 }

@@ -34,7 +34,22 @@ pub struct Codegen<'a, 'ctx> {
     check_bounds_fn: FunctionValue<'ctx>,
     cfi_register_fn: FunctionValue<'ctx>,
     cfi_check_fn: FunctionValue<'ctx>,
+    validate_printf_fn: FunctionValue<'ctx>,
+    ffi_sandbox_in_fn: FunctionValue<'ctx>,
+    ffi_sandbox_out_fn: FunctionValue<'ctx>,
+    loop_barrier_fn: FunctionValue<'ctx>,
+    ffi_enter_fn: FunctionValue<'ctx>,
+    ffi_leave_fn: FunctionValue<'ctx>,
+    register_stack_key_fn: FunctionValue<'ctx>,
+    deregister_stack_key_fn: FunctionValue<'ctx>,
+    get_next_key_fn: FunctionValue<'ctx>,
+    check_enum_range_fn: FunctionValue<'ctx>,
+    variable_keys: HashMap<String, PointerValue<'ctx>>,
+    function_locals: Vec<String>,
+    block_locals: Vec<Vec<String>>,
+    functions: HashMap<String, FunctionDecl>,
     current_fn: Option<FunctionValue<'ctx>>,
+    enums: HashMap<String, (i64, i64)>, // enum name -> (min_val, max_val)
 }
 
 impl<'a, 'ctx> Codegen<'a, 'ctx> {
@@ -68,7 +83,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         );
         let shadow_store_fn = module.add_function("__stricc_rt_shadow_store", shadow_store_fn_type, Some(Linkage::External));
 
-        // void __stricc_rt_check_bounds(void* ptr, void* base, size_t size, uint64_t key, size_t access_size, const char* file, int line)
+        // void __stricc_rt_check_bounds(void* ptr, void* base, size_t size, uint64_t key, size_t access_size, bool is_write, const char* file, int line)
         let check_bounds_fn_type = void_type.fn_type(
             &[
                 ptr_type.into(),
@@ -76,12 +91,25 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 i64_type.into(),
                 i64_type.into(),
                 i64_type.into(),
+                context.bool_type().into(), // is_write
                 ptr_type.into(),
                 i32_type.into(),
             ],
             false,
         );
         let check_bounds_fn = module.add_function("__stricc_rt_check_bounds", check_bounds_fn_type, Some(Linkage::External));
+        let readonly_attr = context.create_string_attribute("readonly", "");
+        let nounwind_attr = context.create_string_attribute("nounwind", "");
+        check_bounds_fn.add_attribute(AttributeLoc::Function, readonly_attr);
+        check_bounds_fn.add_attribute(AttributeLoc::Function, nounwind_attr);
+
+        // void* __stricc_rt_ffi_sandbox_in(void* ptr, size_t size)
+        let ffi_sandbox_in_fn_type = ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let ffi_sandbox_in_fn = module.add_function("__stricc_rt_ffi_sandbox_in", ffi_sandbox_in_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_ffi_sandbox_out(void* dest_ptr, void* sandbox_ptr, size_t size)
+        let ffi_sandbox_out_fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false);
+        let ffi_sandbox_out_fn = module.add_function("__stricc_rt_ffi_sandbox_out", ffi_sandbox_out_fn_type, Some(Linkage::External));
 
         // void __stricc_rt_cfi_register(void* func_ptr, uint64_t signature_hash)
         let cfi_register_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
@@ -90,6 +118,41 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // void __stricc_rt_cfi_check(void* func_ptr, uint64_t expected_hash)
         let cfi_check_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
         let cfi_check_fn = module.add_function("__stricc_rt_cfi_check", cfi_check_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_validate_printf(const char* fmt, int num_args, const int* type_ids)
+        let validate_printf_fn_type = void_type.fn_type(&[ptr_type.into(), i32_type.into(), ptr_type.into()], false);
+        let validate_printf_fn = module.add_function("__stricc_rt_validate_printf", validate_printf_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_loop_barrier()
+        let loop_barrier_fn_type = void_type.fn_type(&[], false);
+        let loop_barrier_fn = module.add_function("__stricc_rt_loop_barrier", loop_barrier_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_ffi_enter()
+        let ffi_enter_fn_type = void_type.fn_type(&[], false);
+        let ffi_enter_fn = module.add_function("__stricc_rt_ffi_enter", ffi_enter_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_ffi_leave()
+        let ffi_leave_fn_type = void_type.fn_type(&[], false);
+        let ffi_leave_fn = module.add_function("__stricc_rt_ffi_leave", ffi_leave_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_register_stack_key(void* addr, uint64_t key)
+        let register_stack_key_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let register_stack_key_fn = module.add_function("__stricc_rt_register_stack_key", register_stack_key_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_deregister_stack_key(void* addr)
+        let deregister_stack_key_fn_type = void_type.fn_type(&[ptr_type.into()], false);
+        let deregister_stack_key_fn = module.add_function("__stricc_rt_deregister_stack_key", deregister_stack_key_fn_type, Some(Linkage::External));
+
+        // uint64_t __stricc_rt_get_next_key()
+        let get_next_key_fn_type = i64_type.fn_type(&[], false);
+        let get_next_key_fn = module.add_function("__stricc_rt_get_next_key", get_next_key_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_check_enum_range(int32_t val, int32_t min_val, int32_t max_val, const char* file, int32_t line)
+        let check_enum_range_fn_type = void_type.fn_type(
+            &[i32_type.into(), i32_type.into(), i32_type.into(), ptr_type.into(), i32_type.into()],
+            false,
+        );
+        let check_enum_range_fn = module.add_function("__stricc_rt_check_enum_range", check_enum_range_fn_type, Some(Linkage::External));
 
         Self {
             context,
@@ -103,13 +166,28 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             struct_types: HashMap::new(),
             unions: HashMap::new(),
             structs: HashMap::new(),
+            functions: HashMap::new(),
             abort_fn,
             shadow_load_fn,
             shadow_store_fn,
             check_bounds_fn,
             cfi_register_fn,
             cfi_check_fn,
+            validate_printf_fn,
+            ffi_sandbox_in_fn,
+            ffi_sandbox_out_fn,
+            loop_barrier_fn,
+            ffi_enter_fn,
+            ffi_leave_fn,
+            register_stack_key_fn,
+            deregister_stack_key_fn,
+            get_next_key_fn,
+            check_enum_range_fn,
+            variable_keys: HashMap::new(),
+            function_locals: Vec::new(),
+            block_locals: Vec::new(),
             current_fn: None,
+            enums: HashMap::new(),
         }
     }
 
@@ -139,7 +217,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     pub fn gen_program(&mut self, program: &Program) {
-        // Populate structs and unions mapping
+        // Populate structs, unions, and functions mapping
         for decl in &program.decls {
             match decl {
                 GlobalDecl::Struct(s) => {
@@ -147,6 +225,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 GlobalDecl::Union(u) => {
                     self.unions.insert(u.name.clone(), u.clone());
+                }
+                GlobalDecl::Function(f) => {
+                    self.functions.insert(f.name.clone(), f.clone());
                 }
                 _ => {}
             }
@@ -254,8 +335,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                                 _ => {}
                             }
                         }
-                    } else {
-                        global.set_initializer(&llvm_ty.const_zero());
                     }
                 }
                 GlobalDecl::Function(f) => {
@@ -263,6 +342,64 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
                 _ => {}
             }
+        }
+
+        // Link-Time Type Validation: Generate defined/declared type signature symbols
+        let mut sig_symbols: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
+        let i8_ty = self.context.i8_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        for decl in &program.decls {
+            match decl {
+                GlobalDecl::Function(f) => {
+                    if self.is_std_lib_symbol(&f.name) {
+                        continue;
+                    }
+                    let sig_hash = self.compute_signature_hash(
+                        &f.return_type,
+                        &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                    );
+                    let sym_name = format!("__stricc_sig_fn_{}_{}", f.name, sig_hash);
+
+                    if f.body.is_some() {
+                        let global = self.module.add_global(i8_ty, None, &sym_name);
+                        global.set_linkage(Linkage::External);
+                        global.set_initializer(&i8_ty.const_int(0, false));
+                        sig_symbols.push(global.as_pointer_value());
+                    } else {
+                        let global = self.module.add_global(i8_ty, None, &sym_name);
+                        global.set_linkage(Linkage::External);
+                        sig_symbols.push(global.as_pointer_value());
+                    }
+                }
+                GlobalDecl::GlobalVar(ty, name, init, _) => {
+                    if self.is_std_lib_symbol(name) {
+                        continue;
+                    }
+                    let type_hash = self.compute_type_hash(ty);
+                    let sym_name = format!("__stricc_sig_var_{}_{}", name, type_hash);
+
+                    if init.is_some() {
+                        let global = self.module.add_global(i8_ty, None, &sym_name);
+                        global.set_linkage(Linkage::External);
+                        global.set_initializer(&i8_ty.const_int(0, false));
+                        sig_symbols.push(global.as_pointer_value());
+                    } else {
+                        let global = self.module.add_global(i8_ty, None, &sym_name);
+                        global.set_linkage(Linkage::External);
+                        sig_symbols.push(global.as_pointer_value());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !sig_symbols.is_empty() {
+            let array_ty = ptr_ty.array_type(sig_symbols.len() as u32);
+            let const_arr = ptr_ty.const_array(&sig_symbols);
+            let refs_global = self.module.add_global(array_ty, None, "__stricc_references");
+            refs_global.set_linkage(Linkage::Internal);
+            refs_global.set_initializer(&const_arr);
         }
     }
 
@@ -284,6 +421,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             self.variable_types.clear();
             self.pointer_metadata.clear();
             self.stack_allocations.clear();
+            self.variable_keys.clear();
+            self.function_locals.clear();
+            self.block_locals.clear();
 
             // Register all defined functions in main's entry block for CFI
             if f.name == "main" {
@@ -341,6 +481,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
                         self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
                     }
+                    for name in &self.function_locals {
+                        if let Some(alloca) = self.variables.get(name) {
+                            let ptr_cast = self.builder.build_pointer_cast(*alloca, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                            self.builder.build_call(self.deregister_stack_key_fn, &[ptr_cast.into()], "stack_dereg").unwrap();
+                        }
+                    }
                     self.builder.build_return(None).unwrap();
                 }
             } else {
@@ -352,6 +498,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
                         self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
                     }
+                    for name in &self.function_locals {
+                        if let Some(alloca) = self.variables.get(name) {
+                            let ptr_cast = self.builder.build_pointer_cast(*alloca, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                            self.builder.build_call(self.deregister_stack_key_fn, &[ptr_cast.into()], "stack_dereg").unwrap();
+                        }
+                    }
                     let zero_val = self.get_llvm_type(&f.return_type).const_zero();
                     self.builder.build_return(Some(&zero_val)).unwrap();
                 }
@@ -362,8 +514,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn gen_stmt(&mut self, stmt: &Stmt) {
         match &stmt.node {
             StmtNode::Compound(stmts) => {
+                self.block_locals.push(Vec::new());
                 for s in stmts {
                     self.gen_stmt(s);
+                }
+                let locals = self.block_locals.pop().unwrap();
+                for name in locals {
+                    if let Some(alloca) = self.variables.get(&name) {
+                        let ptr_cast = self.builder.build_pointer_cast(*alloca, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                        self.builder.build_call(self.deregister_stack_key_fn, &[ptr_cast.into()], "stack_dereg").unwrap();
+                    }
                 }
             }
             StmtNode::Expr(expr) => {
@@ -397,7 +557,28 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         self.builder.position_at_end(cont_bb);
                         
                         let inner_llvm_ty = self.get_llvm_type(inner);
-                        self.builder.build_array_alloca(inner_llvm_ty, size_val, name).unwrap()
+                        let vla_alloca = self.builder.build_array_alloca(inner_llvm_ty, size_val, name).unwrap();
+
+                        // Register VLA pointer in shadow table so bounds checks work on it
+                        let (elem_sz, _) = self.get_type_size_and_align(inner);
+                        let elem_size_val = self.context.i64_type().const_int(elem_sz as u64, false);
+                        let size_val_i64 = if size_val.get_type().get_bit_width() < 64 {
+                            self.builder.build_int_z_extend(size_val, self.context.i64_type(), "vla_size_ext").unwrap()
+                        } else if size_val.get_type().get_bit_width() > 64 {
+                            self.builder.build_int_truncate(size_val, self.context.i64_type(), "vla_size_trunc").unwrap()
+                        } else {
+                            size_val
+                        };
+                        let vla_total_size = self.builder.build_int_mul(size_val_i64, elem_size_val, "vla_total_size").unwrap();
+                        let vla_ptr_cast = self.builder.build_pointer_cast(vla_alloca, self.context.ptr_type(AddressSpace::default()), "vla_ptr_cast").unwrap();
+                        let vla_key = self.builder.build_call(self.get_next_key_fn, &[], "vla_key").unwrap().try_as_basic_value().left().unwrap();
+                        self.builder.build_call(
+                            self.shadow_store_fn,
+                            &[vla_ptr_cast.into(), vla_ptr_cast.into(), vla_total_size.into(), vla_key.into()],
+                            "vla_shadow_store",
+                        ).unwrap();
+
+                        vla_alloca
                     }
                     _ => {
                         let llvm_ty = self.get_llvm_type(ty);
@@ -408,6 +589,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.variables.insert(name.clone(), alloca);
                 self.variable_types.insert(name.clone(), ty.clone());
 
+                // Allocate key slot for stack variable
+                let key_alloca_var = self.builder.build_alloca(self.context.i64_type(), &format!("{}_stack_key", name)).unwrap();
+                let key_val = self.builder.build_call(self.get_next_key_fn, &[], "key_val").unwrap().try_as_basic_value().left().unwrap();
+                self.builder.build_store(key_alloca_var, key_val).unwrap();
+                self.variable_keys.insert(name.clone(), key_alloca_var);
+                self.function_locals.push(name.clone());
+                if !self.block_locals.is_empty() {
+                    self.block_locals.last_mut().unwrap().push(name.clone());
+                }
+
+                // Register variable address in KEY_TABLE
+                let var_ptr_cast = self.builder.build_pointer_cast(alloca, self.context.ptr_type(AddressSpace::default()), "var_ptr_cast").unwrap();
+                self.builder.build_call(self.register_stack_key_fn, &[var_ptr_cast.into(), key_val.into()], "stack_reg").unwrap();
+
                 if ty.is_pointer() || matches!(ty, Type::Array(_, _)) {
                     let base_alloca = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", name)).unwrap();
                     let size_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_size", name)).unwrap();
@@ -417,7 +612,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
                     let array_ptr_cast = self.builder.build_pointer_cast(alloca, self.context.ptr_type(AddressSpace::default()), "array_ptr_cast").unwrap();
                     self.builder.build_store(base_alloca, array_ptr_cast).unwrap();
-                    self.builder.build_store(key_alloca, self.context.i64_type().const_zero()).unwrap();
+                    if matches!(ty, Type::Array(_, _)) {
+                        self.builder.build_store(key_alloca, key_val).unwrap();
+                    } else {
+                        self.builder.build_store(key_alloca, self.context.i64_type().const_zero()).unwrap();
+                    }
 
                     let total_size_val = match ty {
                         Type::Array(inner, ArraySize::Const(len)) => {
@@ -452,13 +651,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     };
 
                     // Register in SHADOW_TABLE
+                    let shadow_key_val = if matches!(ty, Type::Array(_, _)) {
+                        key_val
+                    } else {
+                        self.context.i64_type().const_zero().into()
+                    };
                     self.builder.build_call(
                         self.shadow_store_fn,
                         &[
                             array_ptr_cast.into(),
                             array_ptr_cast.into(),
                             total_size_val.into(),
-                            self.context.i64_type().const_zero().into(),
+                            shadow_key_val.into(),
                         ],
                         "shadow_store",
                     ).unwrap();
@@ -536,10 +740,56 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
                 // Body block
                 self.builder.position_at_end(body_bb);
+                self.builder.build_call(self.loop_barrier_fn, &[], "loop_barrier").unwrap();
                 self.gen_stmt(body);
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.builder.build_unconditional_branch(cond_bb).unwrap();
                 }
+
+                self.builder.position_at_end(merge_bb);
+            }
+            StmtNode::For(init, cond, post, body) => {
+                let func = self.current_fn.unwrap();
+                let cond_bb = self.context.append_basic_block(func, "forcond");
+                let body_bb = self.context.append_basic_block(func, "forbody");
+                let post_bb = self.context.append_basic_block(func, "forpost");
+                let merge_bb = self.context.append_basic_block(func, "forcont");
+
+                // Init
+                if let Some(i) = init {
+                    self.gen_stmt(i);
+                }
+                self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+                // Condition
+                self.builder.position_at_end(cond_bb);
+                if let Some(c) = cond {
+                    let cond_val = self.gen_expr(c).into_int_value();
+                    let cond_val_i1 = if cond_val.get_type() == self.context.bool_type() {
+                        cond_val
+                    } else {
+                        self.builder.build_int_compare(IntPredicate::NE, cond_val, cond_val.get_type().const_zero(), "for_cond_bool").unwrap()
+                    };
+                    self.builder.build_conditional_branch(cond_val_i1, body_bb, merge_bb).unwrap();
+                } else {
+                    // Unconditional loop (for(;;))
+                    self.builder.build_unconditional_branch(body_bb).unwrap();
+                }
+
+                // Body — insert loop barrier to prevent LLVM from optimizing away side-effect-free loops
+                self.builder.position_at_end(body_bb);
+                self.builder.build_call(self.loop_barrier_fn, &[], "loop_barrier").unwrap();
+                self.gen_stmt(body);
+                if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(post_bb).unwrap();
+                }
+
+                // Post (increment)
+                self.builder.position_at_end(post_bb);
+                if let Some(p) = post {
+                    self.gen_expr(p);
+                }
+                self.builder.build_unconditional_branch(cond_bb).unwrap();
 
                 self.builder.position_at_end(merge_bb);
             }
@@ -549,6 +799,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 for &ptr in &self.stack_allocations {
                     let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
                     self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
+                }
+                for name in &self.function_locals {
+                    if let Some(alloca) = self.variables.get(name) {
+                        let ptr_cast = self.builder.build_pointer_cast(*alloca, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                        self.builder.build_call(self.deregister_stack_key_fn, &[ptr_cast.into()], "stack_dereg").unwrap();
+                    }
                 }
 
                 if let Some(expr) = val {
@@ -623,9 +879,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     let dest_ptr = self.gen_expr(inner).into_pointer_value();
                     
                     // Shadow bounds check before store
-                    let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(dest_ptr.into()));
-                    let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
-                    self.emit_bounds_check(dest_ptr, base, size, key, access_size, expr.span);
+                    if !self.is_deref_statically_safe(inner) {
+                        let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(dest_ptr.into()));
+                        let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
+                        self.emit_bounds_check(dest_ptr, base, size, key, access_size, true, expr.span);
+                    }
 
                     // Alignment check before store
                     self.emit_alignment_check(dest_ptr, left.ty.as_ref().unwrap(), expr.span);
@@ -1036,9 +1294,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let ptr_val = val.into_pointer_value();
 
                         // Shadow bounds check
-                        let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(val));
-                        let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
-                        self.emit_bounds_check(ptr_val, base, size, key, access_size, expr.span);
+                        if !self.is_deref_statically_safe(inner) {
+                            let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(val));
+                            let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
+                            self.emit_bounds_check(ptr_val, base, size, key, access_size, false, expr.span);
+                        }
 
                         // Alignment check
                         self.emit_alignment_check(ptr_val, expr.ty.as_ref().unwrap(), expr.span);
@@ -1076,16 +1336,149 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         _ => unreachable!(),
                     };
                     let func = self.module.get_function(func_name).expect("Function not found");
-                    let compiled_args: Vec<BasicValueEnum> = args.iter().map(|arg| self.gen_expr(arg)).collect();
+                    let mut compiled_args: Vec<BasicValueEnum> = args.iter().map(|arg| self.gen_expr(arg)).collect();
+
+                    if func_name == "printf" || func_name == "sprintf" || func_name == "printf_s" {
+                        let fmt_arg_idx = if func_name == "sprintf" { 1 } else { 0 };
+                        if args.len() > fmt_arg_idx {
+                            let fmt_val = compiled_args[fmt_arg_idx];
+                            let num_args = args.len() - fmt_arg_idx - 1;
+                            let i32_type = self.context.i32_type();
+                            let count_val = i32_type.const_int(num_args as u64, false);
+                            let type_ids_val = if num_args > 0 {
+                                let type_ids_arr = self.builder.build_array_alloca(i32_type, count_val, "type_ids").unwrap();
+                                for i in 0..num_args {
+                                    let arg_ty = args[fmt_arg_idx + 1 + i].ty.as_ref().unwrap();
+                                    let id = if arg_ty.is_integer() {
+                                        1
+                                    } else if arg_ty.is_floating() {
+                                        2
+                                    } else if self.is_string_pointer(arg_ty) {
+                                        3
+                                    } else if arg_ty.is_pointer() {
+                                        4
+                                    } else {
+                                        0
+                                    };
+                                    let index = i32_type.const_int(i as u64, false);
+                                    let element_ptr = unsafe {
+                                        self.builder.build_gep(i32_type, type_ids_arr, &[index], "element_ptr").unwrap()
+                                    };
+                                    self.builder.build_store(element_ptr, i32_type.const_int(id as u64, false)).unwrap();
+                                }
+                                type_ids_arr.into()
+                            } else {
+                                self.context.ptr_type(AddressSpace::default()).const_null().into()
+                            };
+
+                            self.builder.build_call(
+                                self.validate_printf_fn,
+                                &[fmt_val.into(), count_val.into(), type_ids_val],
+                                "validate_printf",
+                            ).unwrap();
+                        }
+                    }
+
+                    let is_ffi = if let Some(decl) = self.functions.get(func_name) {
+                        decl.body.is_none() && !self.is_std_lib_symbol(func_name)
+                    } else {
+                        !self.is_std_lib_symbol(func_name)
+                    };
+
+                    let mut sandboxed_info = Vec::new();
+                    if is_ffi {
+                        if let Some(decl) = self.functions.get(func_name).cloned() {
+                            let func_val = self.current_fn.unwrap();
+                            for i in 0..args.len() {
+                                if i < decl.params.len() && decl.params[i].ty.is_pointer() {
+                                    let arg_val = compiled_args[i];
+                                    let (base, size, key) = self.get_expr_pointer_metadata_with_val(&args[i], Some(arg_val));
+                                    
+                                    let size_val = size.into_int_value();
+                                    let is_infinite = self.builder.build_int_compare(
+                                        IntPredicate::EQ,
+                                        size_val,
+                                        self.context.i64_type().const_int(u64::MAX, false),
+                                        "is_infinite",
+                                    ).unwrap();
+                                    
+                                    let current_bb = self.builder.get_insert_block().unwrap();
+                                    let sandbox_bb = self.context.append_basic_block(func_val, "sandbox_in");
+                                    let merge_bb = self.context.append_basic_block(func_val, "sandbox_in_merge");
+                                    
+                                    self.builder.build_conditional_branch(is_infinite, merge_bb, sandbox_bb).unwrap();
+                                    
+                                    self.builder.position_at_end(sandbox_bb);
+                                    let cast_arg = self.builder.build_pointer_cast(arg_val.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "cast_arg").unwrap();
+                                    let sandboxed_val = self.builder.build_call(
+                                        self.ffi_sandbox_in_fn,
+                                        &[cast_arg.into(), size_val.into()],
+                                        "sandbox_call",
+                                    ).unwrap().try_as_basic_value().left().unwrap();
+                                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                                    
+                                    self.builder.position_at_end(merge_bb);
+                                    let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "sandbox_phi").unwrap();
+                                    phi.add_incoming(&[(&arg_val, current_bb), (&sandboxed_val, sandbox_bb)]);
+                                    
+                                    let final_arg_val = phi.as_basic_value();
+                                    compiled_args[i] = final_arg_val;
+                                    sandboxed_info.push((arg_val, final_arg_val, size_val));
+                                }
+                            }
+                        }
+                    }
+
+                    if is_ffi {
+                        self.builder.build_call(self.ffi_enter_fn, &[], "ffi_enter").unwrap();
+                    }
+
                     let call = self.builder.build_call(
                         func,
                         &compiled_args.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
                         "call",
                     ).unwrap();
-                    match call.try_as_basic_value().left() {
+
+                    if is_ffi {
+                        self.builder.build_call(self.ffi_leave_fn, &[], "ffi_leave").unwrap();
+                    }
+
+                    let return_val = match call.try_as_basic_value().left() {
                         Some(val) => val,
                         None => self.context.i32_type().const_zero().into(), // Void fallback
+                    };
+
+                    if is_ffi {
+                        let func_val = self.current_fn.unwrap();
+                        for (orig_ptr, sandboxed_ptr, size_val) in sandboxed_info {
+                            let is_sandboxed = self.builder.build_int_compare(
+                                IntPredicate::NE,
+                                orig_ptr.into_pointer_value(),
+                                sandboxed_ptr.into_pointer_value(),
+                                "is_sandboxed",
+                            ).unwrap();
+                            
+                            let cleanup_bb = self.context.append_basic_block(func_val, "sandbox_out");
+                            let next_bb = self.context.append_basic_block(func_val, "sandbox_out_next");
+                            
+                            self.builder.build_conditional_branch(is_sandboxed, cleanup_bb, next_bb).unwrap();
+                            
+                            self.builder.position_at_end(cleanup_bb);
+                            let orig_cast = self.builder.build_pointer_cast(orig_ptr.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "orig_cast").unwrap();
+                            let sandboxed_cast = self.builder.build_pointer_cast(sandboxed_ptr.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "sandboxed_cast").unwrap();
+                            
+                            self.builder.build_call(
+                                self.ffi_sandbox_out_fn,
+                                &[orig_cast.into(), sandboxed_cast.into(), size_val.into()],
+                                "sandbox_out_call",
+                            ).unwrap();
+                            self.builder.build_unconditional_branch(next_bb).unwrap();
+                            
+                            self.builder.position_at_end(next_bb);
+                        }
                     }
+
+                    return_val
                 } else {
                     let callee_val = self.gen_expr(callee).into_pointer_value();
                     
@@ -1201,14 +1594,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn get_type_size(&self, ty: &Type) -> BasicValueEnum<'ctx> {
-        let size = match ty {
-            Type::Char | Type::UnsignedChar => 1,
-            Type::Short | Type::UnsignedShort => 2,
-            Type::Int | Type::UnsignedInt | Type::Float => 4,
-            Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) | Type::Nullptr => 8,
-            _ => 8,
-        };
-        self.context.i64_type().const_int(size, false).into()
+        let (size, _) = self.get_type_size_and_align(ty);
+        self.context.i64_type().const_int(size as u64, false).into()
     }
 
     fn load_shadow_metadata(&mut self, ptr_val: PointerValue<'ctx>) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
@@ -1259,11 +1646,41 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 let zero = self.context.i64_type().const_zero().into();
                 (null_base, zero, zero)
             }
+            ExprNode::Literal(Literal::String(v)) => {
+                let string_val = val.unwrap_or_else(|| self.gen_expr(expr)).into_pointer_value();
+                let len = v.len() + 1; // including null terminator
+                let size = self.context.i64_type().const_int(len as u64, false).into();
+                // Set the highest bit of key to 1 (const)
+                let const_key = self.context.i64_type().const_int(1 << 63, false).into();
+                (string_val.into(), size, const_key)
+            }
             ExprNode::Unary(UnaryOp::AddrOf, inner) => {
                 let addr = val.unwrap_or_else(|| self.gen_expr(expr));
                 let inner_ty = inner.ty.as_ref().unwrap();
                 let size = self.get_type_size(inner_ty);
-                let key = self.context.i64_type().const_zero().into();
+                let key = if let ExprNode::Identifier(name) = &inner.node {
+                    if let Some(key_slot) = self.variable_keys.get(name) {
+                        let loaded_key = self.builder.build_load(self.context.i64_type(), *key_slot, "loaded_key").unwrap().into_int_value();
+                        if self.has_const(inner_ty) {
+                            let const_mask = self.context.i64_type().const_int(1 << 63, false);
+                            self.builder.build_or(loaded_key, const_mask, "const_key").unwrap().into()
+                        } else {
+                            loaded_key.into()
+                        }
+                    } else {
+                        if self.has_const(inner_ty) {
+                            self.context.i64_type().const_int(1 << 63, false).into()
+                        } else {
+                            self.context.i64_type().const_zero().into()
+                        }
+                    }
+                } else {
+                    if self.has_const(inner_ty) {
+                        self.context.i64_type().const_int(1 << 63, false).into()
+                    } else {
+                        self.context.i64_type().const_zero().into()
+                    }
+                };
                 (addr, size, key)
             }
             ExprNode::Unary(UnaryOp::Deref, inner) => {
@@ -1304,13 +1721,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         size: BasicValueEnum<'ctx>,
         key: BasicValueEnum<'ctx>,
         access_size: BasicValueEnum<'ctx>,
+        is_write: bool,
         span: Span,
     ) {
         let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
         let base_cast = self.builder.build_pointer_cast(base.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "base_cast").unwrap();
         
         let file_val = self.builder.build_global_string_ptr(&self.filename, "file_name").unwrap();
-        let line_val = self.context.i32_type().const_int(0, false); // Real lines tracked via DWARF or set simple 0 for default
+        let line_val = self.context.i32_type().const_int(0, false);
+        let is_write_val = self.context.bool_type().const_int(if is_write { 1 } else { 0 }, false);
         
         self.builder.build_call(
             self.check_bounds_fn,
@@ -1320,6 +1739,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 size.into(),
                 key.into(),
                 access_size.into(),
+                is_write_val.into(),
                 file_val.as_pointer_value().into(),
                 line_val.into(),
             ],
@@ -1748,5 +2168,86 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.build_unreachable().unwrap();
 
         self.builder.position_at_end(cont_bb);
+    }
+
+    fn is_deref_statically_safe(&self, inner: &Expr) -> bool {
+        if let ExprNode::Binary(BinaryOp::Add, left, right) = &inner.node {
+            let check_array_index = |arr_expr: &Expr, idx_expr: &Expr| -> bool {
+                if let ExprNode::Identifier(name) = &arr_expr.node {
+                    if let Some(ty) = self.variable_types.get(name) {
+                        let mut current_ty = ty;
+                        while let Type::Const(inner_ty) = current_ty {
+                            current_ty = inner_ty;
+                        }
+                        if let Type::Array(_, ArraySize::Const(len)) = current_ty {
+                            if let ExprNode::Literal(Literal::Int(idx_val)) = &idx_expr.node {
+                                if *idx_val >= 0 && (*idx_val as usize) < *len {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            };
+            if check_array_index(left, right) || check_array_index(right, left) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn compute_type_hash(&self, ty: &Type) -> u64 {
+        let sig = format!("{:?}", ty);
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in sig.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3u64);
+        }
+        hash
+    }
+
+    fn is_std_lib_symbol(&self, name: &str) -> bool {
+        let std_syms = [
+            "malloc", "calloc", "realloc", "free", "aligned_alloc",
+            "printf", "sprintf", "fprintf", "scanf", "sscanf", "fscanf",
+            "memcpy", "memmove", "memset", "memcmp",
+            "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp",
+            "exit", "abort", "signal", "alarm",
+            "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower",
+            "stdin", "stdout", "stderr", "main",
+        ];
+        name.starts_with("__stricc") || name.starts_with("__builtin") || std_syms.contains(&name)
+    }
+
+    fn is_string_pointer(&self, ty: &Type) -> bool {
+        let mut current = ty;
+        while let Type::Const(inner) = current {
+            current = inner;
+        }
+        if let Type::Pointer(inner) = current {
+            let mut inner_curr = &**inner;
+            while let Type::Const(in_c) = inner_curr {
+                inner_curr = in_c;
+            }
+            matches!(inner_curr, Type::Char | Type::UnsignedChar)
+        } else if let Type::Array(inner, _) = current {
+            let mut inner_curr = &**inner;
+            while let Type::Const(in_c) = inner_curr {
+                inner_curr = in_c;
+            }
+            matches!(inner_curr, Type::Char | Type::UnsignedChar)
+        } else {
+            false
+        }
+    }
+
+    fn has_const(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Const(_) => true,
+            Type::Pointer(inner) => self.has_const(inner),
+            Type::Array(inner, _) => self.has_const(inner),
+            _ => false,
+        }
     }
 }

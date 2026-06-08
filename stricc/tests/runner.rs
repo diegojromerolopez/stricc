@@ -30,13 +30,12 @@ fn build_compiler() {
 fn run_test_case(case: &TestCase) {
     let workspace_root = get_workspace_root();
     let stricc_bin = workspace_root.join("target/debug/stricc");
-    let test_file = workspace_root.join(case.file_path);
     let output_bin = workspace_root.join(format!("target/debug/test_{}", case.name));
 
-    // Ensure output target folder exists
+    // Ensure target folder exists
     let _ = fs::create_dir_all(output_bin.parent().unwrap());
 
-    // Remove old output binary if exists
+    // Clean up old output binary if any
     if output_bin.exists() {
         let _ = fs::remove_file(&output_bin);
     }
@@ -44,8 +43,11 @@ fn run_test_case(case: &TestCase) {
     // Compile with stricc
     let mut cmd = Command::new(&stricc_bin);
     cmd.arg("-o")
-        .arg(&output_bin)
-        .arg(&test_file);
+        .arg(&output_bin);
+
+    for path in case.file_path.split_whitespace() {
+        cmd.arg(workspace_root.join(path));
+    }
 
     let compile_output = cmd.output().expect("Failed to execute stricc compiler");
 
@@ -216,6 +218,72 @@ fn test_safety_matrix() {
             expected_error: None,
             expected_abort: Some("Division overflow"),
         },
+        TestCase {
+            name: "vrp_invalid",
+            file_path: "stricc/tests/safety/vrp_invalid.c",
+            expected_error: Some("Static out-of-bounds array access"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "dynamic_format_invalid",
+            file_path: "stricc/tests/safety/dynamic_format_invalid.c",
+            expected_error: None,
+            expected_abort: Some("stricc dynamic check failure: Mismatched printf argument type"),
+        },
+        TestCase {
+            name: "seq_points_invalid",
+            file_path: "stricc/tests/safety/seq_points_invalid.c",
+            expected_error: Some("Sequence point violation: variable"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "write_to_const_invalid",
+            file_path: "stricc/tests/safety/write_to_const_invalid.c",
+            expected_error: None,
+            expected_abort: Some("Attempted to write to a const object"),
+        },
+        TestCase {
+            name: "ffi_sandbox_invalid",
+            file_path: "stricc/tests/safety/ffi_sandbox_invalid_main.c stricc/tests/safety/ffi_sandbox_invalid_helper.c",
+            expected_error: None,
+            expected_abort: Some("stricc FFI sandbox violation"),
+        },
+        TestCase {
+            name: "ffi_sandbox_page_invalid",
+            file_path: "stricc/tests/safety/ffi_sandbox_page_invalid_main.c stricc/tests/safety/ffi_sandbox_page_invalid_helper.c",
+            expected_error: None,
+            expected_abort: Some("stricc FFI sandbox violation: Out-of-bounds read/write detected in third-party library call"),
+        },
+        TestCase {
+            name: "stack_uaf_invalid",
+            file_path: "stricc/tests/safety/stack_uaf_invalid.c",
+            expected_error: None,
+            expected_abort: Some("stricc dynamic check failure: Use-after-free detected"),
+        },
+        TestCase {
+            name: "setjmp_invalid",
+            file_path: "stricc/tests/safety/setjmp_invalid.c",
+            expected_error: Some("setjmp/longjmp are forbidden"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "user_variadic_invalid",
+            file_path: "stricc/tests/safety/user_variadic_invalid.c",
+            expected_error: Some("User-defined variadic function"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "ptr_to_int_invalid",
+            file_path: "stricc/tests/safety/ptr_to_int_invalid.c",
+            expected_error: Some("Casting pointer to integer"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "vla_bounds_invalid",
+            file_path: "stricc/tests/safety/vla_bounds_invalid.c",
+            expected_error: None,
+            expected_abort: Some("Out-of-bounds pointer access"),
+        },
     ];
 
     for case in &test_cases {
@@ -316,6 +384,96 @@ fn test_defined_behavior() {
         TestCase {
             name: "union_mismatch",
             file_path: "stricc/tests/defined/union_mismatch.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "vrp_valid",
+            file_path: "stricc/tests/defined/vrp_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "link_type_invalid",
+            file_path: "stricc/tests/defined/link_type_invalid_1.c stricc/tests/defined/link_type_invalid_2.c",
+            expected_error: Some("__stricc_sig_var_my_global"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "link_type_valid",
+            file_path: "stricc/tests/defined/link_type_valid_1.c stricc/tests/defined/link_type_valid_2.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "dynamic_format_valid",
+            file_path: "stricc/tests/defined/dynamic_format_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "seq_points_valid",
+            file_path: "stricc/tests/defined/seq_points_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "write_to_const_valid",
+            file_path: "stricc/tests/defined/write_to_const_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "ffi_sandbox_valid",
+            file_path: "stricc/tests/defined/ffi_sandbox_valid_main.c stricc/tests/defined/ffi_sandbox_helper.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "shadow_prune_valid",
+            file_path: "stricc/tests/defined/shadow_prune_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "stack_uaf_valid",
+            file_path: "stricc/tests/defined/stack_uaf_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "infinite_loop_valid",
+            file_path: "stricc/tests/defined/infinite_loop_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "for_loop_valid",
+            file_path: "stricc/tests/defined/for_loop_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "vla_bounds_valid",
+            file_path: "stricc/tests/defined/vla_bounds_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "realloc_valid",
+            file_path: "stricc/tests/defined/realloc_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "memset_null_zero_valid",
+            file_path: "stricc/tests/defined/memset_null_zero_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "signed_shift_valid",
+            file_path: "stricc/tests/defined/signed_shift_valid.c",
             expected_error: None,
             expected_abort: None,
         },

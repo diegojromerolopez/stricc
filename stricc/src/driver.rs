@@ -42,10 +42,19 @@ impl Driver {
         if raw_content.contains("#include <setjmp.h>") {
             return Err("Header <setjmp.h> is forbidden in Safe C mode".to_string());
         }
+        // Detect bare setjmp/longjmp calls even without the header
+        if is_identifier_present(&raw_content, "setjmp") || is_identifier_present(&raw_content, "longjmp") {
+            return Err("setjmp/longjmp are forbidden in Safe C mode (use structured control flow)".to_string());
+        }
         if raw_content.contains("#include <threads.h>") || raw_content.contains("#include <pthread.h>") {
             return Err("Multi-threading headers are forbidden in Safe C mode".to_string());
         }
-        if raw_content.contains("__asm__") || raw_content.contains("asm ") || raw_content.contains("asm(") {
+        // Detect inline assembly in all common forms: __asm__, asm(...), asm {, asm\n, asm\t
+        if raw_content.contains("__asm__") || raw_content.contains("asm(") {
+            return Err("Inline assembly is forbidden in Safe C mode".to_string());
+        }
+        // Check for 'asm' as a standalone keyword (not part of an identifier)
+        if is_identifier_present(&raw_content, "asm") {
             return Err("Inline assembly is forbidden in Safe C mode".to_string());
         }
 
@@ -312,4 +321,31 @@ fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Returns true if `word` appears in `content` as a standalone identifier
+/// (not as a prefix/suffix of another identifier character).
+fn is_identifier_present(content: &str, word: &str) -> bool {
+    let bytes = content.as_bytes();
+    let word_bytes = word.as_bytes();
+    let wlen = word_bytes.len();
+    if wlen == 0 {
+        return false;
+    }
+    let clen = bytes.len();
+    if clen < wlen {
+        return false;
+    }
+    let mut i = 0;
+    while i + wlen <= clen {
+        if &bytes[i..i + wlen] == word_bytes {
+            let before_ok = i == 0 || !(bytes[i - 1] as char).is_alphanumeric() && bytes[i - 1] != b'_';
+            let after_ok = (i + wlen) >= clen || !(bytes[i + wlen] as char).is_alphanumeric() && bytes[i + wlen] != b'_';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }

@@ -95,9 +95,15 @@ type Metadata = (usize, usize, u64);
 
 static SIGNAL_HANDLER_ONCE: std::sync::Once = std::sync::Once::new();
 
+static IN_FFI_CALL: AtomicBool = AtomicBool::new(false);
+
 extern "C" fn sigsegv_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
     unsafe {
-        write_stderr(b"stricc runtime abort: Stack overflow detected\n");
+        if IN_FFI_CALL.load(Ordering::SeqCst) {
+            write_stderr(b"stricc FFI sandbox violation: Out-of-bounds read/write detected in third-party library call\n");
+        } else {
+            write_stderr(b"stricc runtime abort: Stack overflow detected\n");
+        }
         print_backtrace();
         libc::abort();
     }
@@ -321,6 +327,7 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
     size: usize,
     key: u64,
     access_size: usize,
+    is_write: bool,
     file: *const c_char,
     line: i32,
 ) {
@@ -330,6 +337,17 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
     // Check for wildcard / infinite size fallback (un-instrumented pointer)
     if base.is_null() && size == usize::MAX {
         return;
+    }
+
+    if is_write && (key & (1 << 63) != 0) {
+        write_stderr(b"stricc dynamic check failure: Attempted to write to a const object\n");
+        write_stderr(b"-> Location: ");
+        write_stderr_cstr(file);
+        write_stderr(b":");
+        write_stderr_i32(line);
+        write_stderr(b"\n");
+        print_backtrace();
+        libc::abort();
     }
 
     // 1. Spatial check
@@ -353,10 +371,11 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
     }
 
     // 2. Temporal check (CETS)
-    let is_uaf = if key != 0 {
+    let clean_key = key & !(1 << 63);
+    let is_uaf = if clean_key != 0 {
         let key_table = KEY_TABLE.lock().unwrap();
         if let Some(&current_key) = key_table.get(&base_val) {
-            if current_key != key {
+            if current_key != clean_key {
                 Some(Some(current_key))
             } else {
                 None
@@ -373,7 +392,7 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
             Some(current_key) => {
                 write_stderr(b"stricc dynamic check failure: Use-after-free detected\n");
                 write_stderr(b"-> Pointer key: ");
-                write_stderr_u64(key);
+                write_stderr_u64(clean_key);
                 write_stderr(b", Active allocation key: ");
                 write_stderr_u64(current_key);
                 write_stderr(b"\n-> Location: ");
@@ -385,7 +404,7 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
             None => {
                 write_stderr(b"stricc dynamic check failure: Use-after-free detected (dangling pointer)\n");
                 write_stderr(b"-> Pointer key: ");
-                write_stderr_u64(key);
+                write_stderr_u64(clean_key);
                 write_stderr(b" (freed)\n-> Location: ");
                 write_stderr_cstr(file);
                 write_stderr(b":");
@@ -428,12 +447,42 @@ fn print_backtrace() {
     let mut depth = 0u32;
     backtrace::trace(|frame| {
         let ip = frame.ip();
-        unsafe {
-            write_stderr(b"  #");
-            write_stderr_usize(depth as usize);
-            write_stderr(b" ");
-            write_stderr_ptr(ip as usize);
-            write_stderr(b"\n");
+        let mut sym_printed = false;
+        backtrace::resolve(ip, |symbol| {
+            if !sym_printed {
+                unsafe {
+                    write_stderr(b"  #");
+                    write_stderr_usize(depth as usize);
+                    write_stderr(b" ");
+                    write_stderr_ptr(ip as usize);
+                    if let Some(name) = symbol.name() {
+                        write_stderr(b" ");
+                        let name_str = name.to_string();
+                        write_stderr(name_str.as_bytes());
+                    }
+                    if let Some(file) = symbol.filename() {
+                        if let Some(file_str) = file.to_str() {
+                            write_stderr(b"\n    at ");
+                            write_stderr(file_str.as_bytes());
+                            if let Some(lineno) = symbol.lineno() {
+                                write_stderr(b":");
+                                write_stderr_usize(lineno as usize);
+                            }
+                        }
+                    }
+                    write_stderr(b"\n");
+                }
+                sym_printed = true;
+            }
+        });
+        if !sym_printed {
+            unsafe {
+                write_stderr(b"  #");
+                write_stderr_usize(depth as usize);
+                write_stderr(b" ");
+                write_stderr_ptr(ip as usize);
+                write_stderr(b" <unknown>\n");
+            }
         }
         depth += 1;
         depth < 32 // limit depth
@@ -1014,4 +1063,277 @@ pub unsafe extern "C" fn toupper(c: i32) -> i32 {
         libc::abort();
     }
     libc::toupper(c)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_validate_printf(
+    fmt: *const c_char,
+    num_args: std::os::raw::c_int,
+    type_ids: *const std::os::raw::c_int,
+) {
+    if fmt.is_null() {
+        write_stderr(b"stricc dynamic check failure: Null format string passed to printf\n");
+        print_backtrace();
+        libc::abort();
+    }
+
+    let mut len = 0;
+    while *fmt.add(len) != 0 {
+        len += 1;
+    }
+    let fmt_slice = std::slice::from_raw_parts(fmt as *const u8, len);
+    let fmt_str = match std::str::from_utf8(fmt_slice) {
+        Ok(s) => s,
+        Err(_) => {
+            write_stderr(b"stricc dynamic check failure: Invalid UTF-8 format string passed to printf\n");
+            print_backtrace();
+            libc::abort();
+        }
+    };
+
+    let mut specifiers = Vec::new();
+    let mut chars = fmt_str.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let Some(&next_c) = chars.peek() {
+                if next_c == '%' {
+                    chars.next();
+                    continue;
+                }
+            }
+            let mut spec = String::new();
+            while let Some(&next_c) = chars.peek() {
+                if next_c.is_alphabetic() || next_c == '*' || next_c == '.' || next_c.is_digit(10) || next_c == '-' || next_c == '+' {
+                    spec.push(next_c);
+                    chars.next();
+                    if next_c.is_alphabetic() {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            specifiers.push(spec);
+        }
+    }
+
+    let mut arg_idx = 0;
+    let type_ids_slice = if num_args > 0 && !type_ids.is_null() {
+        std::slice::from_raw_parts(type_ids, num_args as usize)
+    } else {
+        &[]
+    };
+
+    for spec in specifiers {
+        for c in spec.chars() {
+            if c == '*' {
+                if arg_idx >= num_args as usize {
+                    write_stderr(b"stricc dynamic check failure: Mismatched printf arguments (missing argument for '*')\n");
+                    print_backtrace();
+                    libc::abort();
+                }
+                if type_ids_slice[arg_idx] != 1 {
+                    write_stderr(b"stricc dynamic check failure: Expected integer for '*' specifier\n");
+                    print_backtrace();
+                    libc::abort();
+                }
+                arg_idx += 1;
+            }
+        }
+
+        if arg_idx >= num_args as usize {
+            write_stderr(b"stricc dynamic check failure: Mismatched printf arguments (missing arguments for specifier)\n");
+            print_backtrace();
+            libc::abort();
+        }
+
+        let expected_ty_id = match spec.chars().last() {
+            Some('d') | Some('i') | Some('o') | Some('u') | Some('x') | Some('X') | Some('c') => 1,
+            Some('f') | Some('e') | Some('E') | Some('g') | Some('G') => 2,
+            Some('s') => 3,
+            Some('p') => 4,
+            _ => 0,
+        };
+
+        if expected_ty_id != 0 {
+            let actual_ty_id = type_ids_slice[arg_idx];
+            if expected_ty_id != actual_ty_id {
+                write_stderr(b"stricc dynamic check failure: Mismatched printf argument type\n");
+                print_backtrace();
+                libc::abort();
+            }
+            arg_idx += 1;
+        }
+    }
+
+    if arg_idx < num_args as usize {
+        write_stderr(b"stricc dynamic check failure: Mismatched printf arguments: too many arguments provided\n");
+        print_backtrace();
+        libc::abort();
+    }
+}
+
+const CANARY: u64 = 0xDEADC0DEBAADF00D;
+const CANARY_SIZE: usize = 8;
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_in(ptr: *mut c_void, size: usize) -> *mut c_void {
+    if ptr.is_null() || size == 0 {
+        return ptr;
+    }
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let total_data_size = size + CANARY_SIZE;
+    let num_data_pages = (total_data_size + page_size - 1) / page_size;
+    let alloc_size = (num_data_pages + 2) * page_size;
+
+    let alloc_ptr = libc::mmap(
+        std::ptr::null_mut(),
+        alloc_size,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if alloc_ptr == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+
+    // Set LHS guard page to PROT_NONE (no access)
+    libc::mprotect(alloc_ptr, page_size, libc::PROT_NONE);
+
+    // Set RHS guard page to PROT_NONE (no access)
+    let rhs_guard_ptr = (alloc_ptr as *mut u8).add((num_data_pages + 1) * page_size);
+    libc::mprotect(rhs_guard_ptr as *mut c_void, page_size, libc::PROT_NONE);
+
+    // Data pointer starts after the LHS guard page
+    let data_ptr = (alloc_ptr as *mut u8).add(page_size) as *mut c_void;
+
+    std::ptr::copy_nonoverlapping(ptr, data_ptr, size);
+    let canary_ptr = (data_ptr as *mut u8).add(size) as *mut u64;
+    std::ptr::write_unaligned(canary_ptr, CANARY);
+    data_ptr
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_out(dest_ptr: *mut c_void, sandbox_ptr: *mut c_void, size: usize) {
+    if dest_ptr.is_null() || sandbox_ptr.is_null() || size == 0 {
+        return;
+    }
+    if dest_ptr == sandbox_ptr {
+        return;
+    }
+    let canary_ptr = (sandbox_ptr as *const u8).add(size) as *const u64;
+    if std::ptr::read_unaligned(canary_ptr) != CANARY {
+        write_stderr(b"stricc FFI sandbox violation: Out-of-bounds write detected in third-party library call\n");
+        libc::abort();
+    }
+    std::ptr::copy_nonoverlapping(sandbox_ptr, dest_ptr, size);
+
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let total_data_size = size + CANARY_SIZE;
+    let num_data_pages = (total_data_size + page_size - 1) / page_size;
+    let alloc_size = (num_data_pages + 2) * page_size;
+    let alloc_ptr = (sandbox_ptr as *mut u8).sub(page_size) as *mut c_void;
+
+    // munmap automatically frees the whole region including LHS/RHS guard pages
+    libc::munmap(alloc_ptr, alloc_size);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_ffi_enter() {
+    IN_FFI_CALL.store(true, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_ffi_leave() {
+    IN_FFI_CALL.store(false, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_register_stack_key(ptr: *mut c_void, key: u64) {
+    let _guard = RuntimeGuard::enter();
+    let addr = ptr as usize;
+    let mut key_table = KEY_TABLE.lock().unwrap();
+    key_table.insert(addr, key);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_deregister_stack_key(ptr: *mut c_void) {
+    let _guard = RuntimeGuard::enter();
+    let addr = ptr as usize;
+    let mut key_table = KEY_TABLE.lock().unwrap();
+    key_table.remove(&addr);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_get_next_key() -> u64 {
+    let _guard = RuntimeGuard::enter();
+    let mut next_key = NEXT_KEY.lock().unwrap();
+    let key = *next_key;
+    *next_key += 1;
+    key
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_loop_barrier() {
+    // Loop barrier with External linkage ensures LLVM optimizer preserves empty/infinite loops
+}
+
+// Wrapper for memset
+#[no_mangle]
+pub unsafe extern "C" fn memset(dest: *mut c_void, c: i32, n: usize) -> *mut c_void {
+    if n == 0 {
+        return dest;
+    }
+    if dest.is_null() {
+        write_stderr(b"stricc dynamic check failure: Null pointer passed to memset\n");
+        print_backtrace();
+        libc::abort();
+    }
+    let d = dest as *mut u8;
+    for i in 0..n {
+        *d.add(i) = c as u8;
+    }
+    dest
+}
+
+// Wrapper for memmove
+#[no_mangle]
+pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+    if n == 0 {
+        return dest;
+    }
+    if dest.is_null() || src.is_null() {
+        write_stderr(b"stricc dynamic check failure: Null pointer passed to memmove\n");
+        print_backtrace();
+        libc::abort();
+    }
+    libc::memmove(dest, src, n)
+}
+
+// Runtime check: enum value must be within declared range [min_val, max_val]
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_check_enum_range(
+    val: i32,
+    min_val: i32,
+    max_val: i32,
+    file: *const c_char,
+    line: i32,
+) {
+    if val < min_val || val > max_val {
+        write_stderr(b"stricc dynamic check failure: Enum value out of range\n");
+        write_stderr(b"-> Value: ");
+        write_stderr_i32(val);
+        write_stderr(b", Expected range: [");
+        write_stderr_i32(min_val);
+        write_stderr(b", ");
+        write_stderr_i32(max_val);
+        write_stderr(b"] at ");
+        write_stderr_cstr(file);
+        write_stderr(b":");
+        write_stderr_i32(line);
+        write_stderr(b"\n");
+        print_backtrace();
+        libc::abort();
+    }
 }
