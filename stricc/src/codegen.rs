@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::error::Span;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::attributes::AttributeLoc;
 use inkwell::module::{Module, Linkage};
 use inkwell::types::{BasicType, BasicTypeEnum, FunctionType, StructType, IntType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, InstructionValue, PointerValue, IntValue, FloatValue};
@@ -269,6 +270,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let func = self.module.get_function(&f.name).unwrap();
         self.current_fn = Some(func);
 
+        let probe_stack_attr = self.context.create_string_attribute("probe-stack", "inline-asm");
+        func.add_attribute(AttributeLoc::Function, probe_stack_attr);
+        
+        let probe_size_attr = self.context.create_string_attribute("stack-probe-size", "4096");
+        func.add_attribute(AttributeLoc::Function, probe_size_attr);
+
         if let Some(body) = &f.body {
             let entry_block = self.context.append_basic_block(func, "entry");
             self.builder.position_at_end(entry_block);
@@ -280,6 +287,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
             // Register all defined functions in main's entry block for CFI
             if f.name == "main" {
+                let ensure_sig_fn = self.module.get_function("__stricc_rt_ensure_signal_handler").unwrap_or_else(|| {
+                    let fn_type = self.context.void_type().fn_type(&[], false);
+                    self.module.add_function("__stricc_rt_ensure_signal_handler", fn_type, Some(Linkage::External))
+                });
+                self.builder.build_call(ensure_sig_fn, &[], "sig_init").unwrap();
+
                 for (fn_name, hash) in defined_functions {
                     if let Some(target_fn) = self.module.get_function(fn_name) {
                         let func_ptr = target_fn.as_global_value().as_pointer_value();
@@ -1011,7 +1024,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 match op {
                     UnaryOp::Neg => self.builder.build_int_neg(val.into_int_value(), "neg").unwrap().into(),
                     UnaryOp::Not => {
-                        let cmp = self.builder.build_int_compare(IntPredicate::EQ, val.into_int_value(), val.into_int_value().get_type().const_zero(), "not").unwrap();
+                        let int_val = if val.is_pointer_value() {
+                            self.builder.build_ptr_to_int(val.into_pointer_value(), self.context.i64_type(), "ptr_to_int").unwrap()
+                        } else {
+                            val.into_int_value()
+                        };
+                        let cmp = self.builder.build_int_compare(IntPredicate::EQ, int_val, int_val.get_type().const_zero(), "not").unwrap();
                         cmp.into()
                     }
                     UnaryOp::Deref => {

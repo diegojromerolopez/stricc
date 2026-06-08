@@ -93,6 +93,45 @@ unsafe fn write_stderr_ptr(p: usize) {
 
 type Metadata = (usize, usize, u64);
 
+static SIGNAL_HANDLER_ONCE: std::sync::Once = std::sync::Once::new();
+
+extern "C" fn sigsegv_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
+    unsafe {
+        write_stderr(b"stricc runtime abort: Stack overflow detected\n");
+        print_backtrace();
+        libc::abort();
+    }
+}
+
+unsafe fn setup_alt_stack() {
+    let mut stack: libc::stack_t = std::mem::zeroed();
+    let stack_size = 64 * 1024; // 64 KB
+    let stack_ptr = libc::malloc(stack_size);
+    if !stack_ptr.is_null() {
+        stack.ss_sp = stack_ptr;
+        stack.ss_size = stack_size;
+        stack.ss_flags = 0;
+        libc::sigaltstack(&stack, std::ptr::null_mut());
+    }
+}
+
+unsafe fn register_signal_handler() {
+    setup_alt_stack();
+    let mut sa: libc::sigaction = std::mem::zeroed();
+    sa.sa_sigaction = sigsegv_handler as libc::sighandler_t;
+    sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+    libc::sigemptyset(&mut sa.sa_mask);
+    libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+    libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __stricc_rt_ensure_signal_handler() {
+    SIGNAL_HANDLER_ONCE.call_once(|| {
+        register_signal_handler();
+    });
+}
+
 static SHADOW_TABLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // Global Shadow Table: maps address of a pointer variable in memory -> Metadata of that pointer
@@ -599,6 +638,84 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     }
 
     new_ptr
+}
+
+// Wrapper for aligned_alloc
+#[no_mangle]
+pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
+    let is_power_of_two = alignment > 0 && (alignment & (alignment - 1)) == 0;
+    let is_multiple = size % alignment == 0;
+
+    if !is_power_of_two || !is_multiple {
+        write_stderr(b"stricc dynamic check failure: Invalid alignment or size in aligned_alloc\n");
+        write_stderr(b"-> Requested alignment: ");
+        write_stderr_usize(alignment);
+        write_stderr(b", size: ");
+        write_stderr_usize(size);
+        write_stderr(b"\n");
+        print_backtrace();
+        libc::abort();
+    }
+
+    if REAL_MALLOC.get().is_none() {
+        static mut INITIALIZING: bool = false;
+        if INITIALIZING {
+            return bootstrap_malloc(size);
+        }
+        INITIALIZING = true;
+        init_real_functions();
+        INITIALIZING = false;
+    }
+
+    let recursed = get_in_runtime();
+    if recursed {
+        let mut ptr = std::ptr::null_mut();
+        if alignment <= 16 {
+            if let Some(real_malloc) = REAL_MALLOC.get() {
+                ptr = real_malloc(size);
+            } else {
+                ptr = bootstrap_malloc(size);
+            }
+        } else {
+            let ret = libc::posix_memalign(&mut ptr, alignment, size);
+            if ret != 0 {
+                ptr = std::ptr::null_mut();
+            }
+        }
+        return ptr;
+    }
+
+    let _guard = RuntimeGuard::enter();
+
+    let mut ptr = std::ptr::null_mut();
+    if alignment <= 16 {
+        let real_malloc = *REAL_MALLOC.get().unwrap();
+        ptr = real_malloc(size);
+    } else {
+        let ret = libc::posix_memalign(&mut ptr, alignment, size);
+        if ret != 0 {
+            ptr = std::ptr::null_mut();
+        }
+    }
+
+    if ptr.is_null() {
+        return ptr;
+    }
+
+    let mut next_key = NEXT_KEY.lock().unwrap();
+    let key = *next_key;
+    *next_key += 1;
+
+    let addr = ptr as usize;
+
+    let mut key_table = KEY_TABLE.lock().unwrap();
+    key_table.insert(addr, key);
+
+    let mut shadow_table = SHADOW_TABLE.lock().unwrap();
+    SHADOW_TABLE_INITIALIZED.store(true, Ordering::SeqCst);
+    shadow_table.insert(addr, (addr, size, key));
+
+    ptr
 }
 
 // Global CFI Table: function pointer -> signature hash

@@ -175,6 +175,18 @@ fn test_safety_matrix() {
             expected_abort: None,
         },
         TestCase {
+            name: "stack_overflow",
+            file_path: "stricc/tests/safety/stack_overflow.c",
+            expected_error: None,
+            expected_abort: Some("Stack overflow detected"),
+        },
+        TestCase {
+            name: "aligned_alloc_invalid",
+            file_path: "stricc/tests/safety/aligned_alloc_invalid.c",
+            expected_error: None,
+            expected_abort: Some("Invalid alignment or size in aligned_alloc"),
+        },
+        TestCase {
             name: "float_overflow",
             file_path: "stricc/tests/safety/float_overflow.c",
             expected_error: None,
@@ -217,6 +229,12 @@ fn test_defined_behavior() {
     build_compiler();
 
     let test_cases = vec![
+        TestCase {
+            name: "aligned_alloc_valid",
+            file_path: "stricc/tests/defined/aligned_alloc_valid.c",
+            expected_error: None,
+            expected_abort: None,
+        },
         TestCase {
             name: "uninitialized_read",
             file_path: "stricc/tests/defined/uninitialized_read.c",
