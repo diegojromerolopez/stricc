@@ -37,6 +37,7 @@ pub enum TokenKind {
     Alignof,
     Atomic,
     Unsafe,
+    Restrict,
 
     // Identifiers and Literals
     Identifier(String),
@@ -554,6 +555,7 @@ impl<'a> Lexer<'a> {
                     "alignof" => TokenKind::Alignof,
                     "_Atomic" => TokenKind::Atomic,
                     "__unsafe" => TokenKind::Unsafe,
+                    "restrict" => TokenKind::Restrict,
                     _ => TokenKind::Identifier(word),
                 }
             }

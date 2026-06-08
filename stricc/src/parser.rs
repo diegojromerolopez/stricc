@@ -181,6 +181,40 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Check union definition
+        if self.match_token(&TokenKind::Union) {
+            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected union name")?;
+            let name = match name_tok.kind {
+                TokenKind::Identifier(n) => n,
+                _ => unreachable!(),
+            };
+
+            if self.match_token(&TokenKind::LBrace) {
+                let mut fields = Vec::new();
+                while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
+                    let field_ty = self.parse_type()?;
+                    let field_name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected field name")?;
+                    let field_name = match field_name_tok.kind {
+                        TokenKind::Identifier(n) => n,
+                        _ => unreachable!(),
+                    };
+                    self.consume(&TokenKind::Semicolon, "Expected ';' after field declaration")?;
+                    fields.push(Field { name: field_name, ty: field_ty });
+                }
+                self.consume(&TokenKind::RBrace, "Expected '}' to close union definition")?;
+                self.consume(&TokenKind::Semicolon, "Expected ';' after union declaration")?;
+                let end_span = self.tokens[self.position - 1].span;
+                return Ok(GlobalDecl::Union(StructDecl {
+                    name,
+                    fields,
+                    span: start_span.union(end_span),
+                }));
+            } else {
+                // Union tag used in variable or function declaration
+                self.position -= 2; // backtrack Union name_tok
+            }
+        }
+
         // Parse global variable or function declaration
         let base_ty = self.parse_type()?;
         let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected name")?;
@@ -254,28 +288,56 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn check_type_start(&self) -> bool {
+        self.check(&TokenKind::Int)
+            || self.check(&TokenKind::Char)
+            || self.check(&TokenKind::Float)
+            || self.check(&TokenKind::Double)
+            || self.check(&TokenKind::Short)
+            || self.check(&TokenKind::Long)
+            || self.check(&TokenKind::Bool)
+            || self.check(&TokenKind::Void)
+            || self.check(&TokenKind::Struct)
+            || self.check(&TokenKind::Union)
+            || self.check(&TokenKind::Enum)
+            || self.check(&TokenKind::Auto)
+            || self.check(&TokenKind::Const)
+            || self.check(&TokenKind::Typeof)
+            || self.check(&TokenKind::Atomic)
+            || self.check(&TokenKind::Unsigned)
+            || self.check(&TokenKind::Signed)
+    }
+
     fn parse_type(&mut self) -> Result<Type, String> {
-        let mut ty = if self.match_token(&TokenKind::Const) {
-            // Const qualifier - in this subset, we'll wrap it or parse it natively
-            self.parse_base_type()?
-        } else {
-            self.parse_base_type()?
-        };
+        let is_const = self.match_token(&TokenKind::Const);
+        let mut ty = self.parse_base_type()?;
+        if is_const {
+            ty = Type::Const(Box::new(ty));
+        }
 
         // Pointer qualification
         while self.match_token(&TokenKind::Star) {
             ty = Type::Pointer(Box::new(ty));
+            while self.match_token(&TokenKind::Restrict) {
+                // Ignore restrict qualifier
+            }
         }
 
         // Array qualification
         if self.match_token(&TokenKind::LBracket) {
-            let len_tok = self.consume(&TokenKind::IntLiteral(0), "Expected array length")?;
-            let len = match len_tok.kind {
-                TokenKind::IntLiteral(v) => v as usize,
-                _ => unreachable!(),
+            let size = if self.check(&TokenKind::IntLiteral(0)) {
+                let len_tok = self.consume(&TokenKind::IntLiteral(0), "Expected array length")?;
+                let len = match len_tok.kind {
+                    TokenKind::IntLiteral(v) => v as usize,
+                    _ => unreachable!(),
+                };
+                ArraySize::Const(len)
+            } else {
+                let expr = self.parse_expr()?;
+                ArraySize::Variable(Box::new(expr))
             };
             self.consume(&TokenKind::RBracket, "Expected ']'")?;
-            ty = Type::Array(Box::new(ty), len);
+            ty = Type::Array(Box::new(ty), size);
         }
 
         Ok(ty)
@@ -348,13 +410,7 @@ impl<'a> Parser<'a> {
         } else if self.match_token(&TokenKind::Typeof) {
             self.consume(&TokenKind::LParen, "Expected '(' after typeof")?;
             // Determine if expression or type. Let's see: if first token is a type keyword, parse type.
-            let is_type = self.check(&TokenKind::Int)
-                || self.check(&TokenKind::Char)
-                || self.check(&TokenKind::Float)
-                || self.check(&TokenKind::Double)
-                || self.check(&TokenKind::Void)
-                || self.check(&TokenKind::Struct)
-                || self.check(&TokenKind::Union);
+            let is_type = self.check_type_start();
             let res = if is_type {
                 let inner_ty = self.parse_type()?;
                 Type::TypeofType(Box::new(inner_ty))
@@ -509,21 +565,7 @@ impl<'a> Parser<'a> {
             })
         } else {
             // Check if variable declaration (e.g. starts with type keyword or typeof/const/auto)
-            let is_type = self.check(&TokenKind::Int)
-                || self.check(&TokenKind::Char)
-                || self.check(&TokenKind::Float)
-                || self.check(&TokenKind::Double)
-                || self.check(&TokenKind::Short)
-                || self.check(&TokenKind::Long)
-                || self.check(&TokenKind::Bool)
-                || self.check(&TokenKind::Void)
-                || self.check(&TokenKind::Struct)
-                || self.check(&TokenKind::Union)
-                || self.check(&TokenKind::Enum)
-                || self.check(&TokenKind::Auto)
-                || self.check(&TokenKind::Const)
-                || self.check(&TokenKind::Typeof)
-                || self.check(&TokenKind::Atomic);
+            let is_type = self.check_type_start();
 
             if is_type {
                 let ty = self.parse_type()?;
@@ -531,6 +573,25 @@ impl<'a> Parser<'a> {
                 let name = match name_tok.kind {
                     TokenKind::Identifier(n) => n,
                     _ => unreachable!(),
+                };
+
+                // Support C-style array declarations: type name[size];
+                let ty = if self.match_token(&TokenKind::LBracket) {
+                    let size = if self.check(&TokenKind::IntLiteral(0)) {
+                        let len_tok = self.consume(&TokenKind::IntLiteral(0), "Expected array length")?;
+                        let len = match len_tok.kind {
+                            TokenKind::IntLiteral(v) => v as usize,
+                            _ => unreachable!(),
+                        };
+                        ArraySize::Const(len)
+                    } else {
+                        let expr = self.parse_expr()?;
+                        ArraySize::Variable(Box::new(expr))
+                    };
+                    self.consume(&TokenKind::RBracket, "Expected ']'")?;
+                    Type::Array(Box::new(ty), size)
+                } else {
+                    ty
                 };
 
                 let mut init = None;
@@ -815,14 +876,7 @@ impl<'a> Parser<'a> {
         } else if self.match_token(&TokenKind::Sizeof) {
             self.consume(&TokenKind::LParen, "Expected '(' after sizeof")?;
             // Determine if expression or type. Let's see: if first token is a type, parse type.
-            let is_type = self.check(&TokenKind::Int)
-                || self.check(&TokenKind::Char)
-                || self.check(&TokenKind::Float)
-                || self.check(&TokenKind::Double)
-                || self.check(&TokenKind::Void)
-                || self.check(&TokenKind::Struct)
-                || self.check(&TokenKind::Union)
-                || self.check(&TokenKind::Enum);
+            let is_type = self.check_type_start();
             let res = if is_type {
                 let ty = self.parse_type()?;
                 ExprNode::SizeofType(ty)
@@ -839,14 +893,7 @@ impl<'a> Parser<'a> {
             })
         } else if self.match_token(&TokenKind::Alignof) {
             self.consume(&TokenKind::LParen, "Expected '(' after alignof")?;
-            let is_type = self.check(&TokenKind::Int)
-                || self.check(&TokenKind::Char)
-                || self.check(&TokenKind::Float)
-                || self.check(&TokenKind::Double)
-                || self.check(&TokenKind::Void)
-                || self.check(&TokenKind::Struct)
-                || self.check(&TokenKind::Union)
-                || self.check(&TokenKind::Enum);
+            let is_type = self.check_type_start();
             let res = if is_type {
                 let ty = self.parse_type()?;
                 ExprNode::AlignofType(ty)
@@ -863,15 +910,7 @@ impl<'a> Parser<'a> {
             })
         } else if self.match_token(&TokenKind::LParen) {
             // Check if this is a Cast: `(type) expr`
-            let is_type = self.check(&TokenKind::Int)
-                || self.check(&TokenKind::Char)
-                || self.check(&TokenKind::Float)
-                || self.check(&TokenKind::Double)
-                || self.check(&TokenKind::Void)
-                || self.check(&TokenKind::Struct)
-                || self.check(&TokenKind::Union)
-                || self.check(&TokenKind::Enum)
-                || self.check(&TokenKind::Const);
+            let is_type = self.check_type_start();
 
             if is_type {
                 let cast_ty = self.parse_type()?;

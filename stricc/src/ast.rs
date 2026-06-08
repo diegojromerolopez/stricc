@@ -1,6 +1,12 @@
 use crate::error::Span;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ArraySize {
+    Const(usize),
+    Variable(Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Void,
     Bool,
@@ -15,7 +21,7 @@ pub enum Type {
     UnsignedShort,
     UnsignedLong,
     Pointer(Box<Type>),
-    Array(Box<Type>, usize),
+    Array(Box<Type>, ArraySize),
     Struct(String),
     Union(String),
     Enum(String),
@@ -24,26 +30,33 @@ pub enum Type {
     TypeofExpression(Box<Expr>),
     TypeofType(Box<Type>),
     Atomic(Box<Type>),
+    Const(Box<Type>),
 }
 
 impl Type {
     pub fn is_integer(&self) -> bool {
-        matches!(
-            self,
-            Type::Bool
-                | Type::Char
-                | Type::Int
-                | Type::Short
-                | Type::Long
-                | Type::UnsignedInt
-                | Type::UnsignedChar
-                | Type::UnsignedShort
-                | Type::UnsignedLong
-        )
+        match self {
+            Type::Const(inner) => inner.is_integer(),
+            _ => matches!(
+                self,
+                Type::Bool
+                    | Type::Char
+                    | Type::Int
+                    | Type::Short
+                    | Type::Long
+                    | Type::UnsignedInt
+                    | Type::UnsignedChar
+                    | Type::UnsignedShort
+                    | Type::UnsignedLong
+            ),
+        }
     }
 
     pub fn is_floating(&self) -> bool {
-        matches!(self, Type::Float | Type::Double)
+        match self {
+            Type::Const(inner) => inner.is_floating(),
+            _ => matches!(self, Type::Float | Type::Double),
+        }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -51,7 +64,10 @@ impl Type {
     }
 
     pub fn is_pointer(&self) -> bool {
-        matches!(self, Type::Pointer(_) | Type::Nullptr)
+        match self {
+            Type::Const(inner) => inner.is_pointer(),
+            _ => matches!(self, Type::Pointer(_) | Type::Nullptr),
+        }
     }
 }
 
@@ -179,6 +195,7 @@ pub struct FunctionDecl {
 pub enum GlobalDecl {
     Function(FunctionDecl),
     Struct(StructDecl),
+    Union(StructDecl),
     GlobalVar(Type, String, Option<Expr>, Span),
 }
 

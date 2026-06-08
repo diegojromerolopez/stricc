@@ -45,6 +45,7 @@ pub struct Typechecker {
     variables: SymbolTable<Type>,
     functions: HashMap<String, FunctionDecl>,
     structs: HashMap<String, StructDecl>,
+    unions: HashMap<String, StructDecl>,
     filename: String,
     pub errors: Vec<Diagnostic>,
     // Stack variable tracking for escape analysis
@@ -59,6 +60,7 @@ impl Typechecker {
             variables: SymbolTable::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
+            unions: HashMap::new(),
             filename: filename.to_string(),
             errors: Vec::new(),
             local_vars: SymbolTable::new(),
@@ -67,14 +69,32 @@ impl Typechecker {
     }
 
     pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<Diagnostic>> {
-        // First pass: Register structs and function signatures
+        // First pass: Register structs, unions and function signatures
         for decl in &program.decls {
             match decl {
                 GlobalDecl::Struct(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
                 }
+                GlobalDecl::Union(u) => {
+                    self.unions.insert(u.name.clone(), u.clone());
+                }
                 GlobalDecl::Function(f) => {
-                    self.functions.insert(f.name.clone(), f.clone());
+                    if let Some(existing_decl) = self.functions.get(&f.name) {
+                        if existing_decl.return_type != f.return_type 
+                            || existing_decl.params.len() != f.params.len()
+                            || existing_decl.is_variadic != f.is_variadic
+                            || existing_decl.params.iter().zip(f.params.iter()).any(|(p1, p2)| p1.ty != p2.ty)
+                        {
+                            self.errors.push(Diagnostic::error_with_span(
+                                format!("Conflicting redeclaration of function '{}'", f.name),
+                                f.span,
+                                "Conflicting redeclaration".to_string(),
+                                &self.filename,
+                            ));
+                        }
+                    } else {
+                        self.functions.insert(f.name.clone(), f.clone());
+                    }
                 }
                 _ => {}
             }
@@ -97,16 +117,29 @@ impl Typechecker {
     fn check_global_decl(&mut self, decl: &mut GlobalDecl) -> Result<(), Diagnostic> {
         match decl {
             GlobalDecl::Struct(_) => Ok(()),
+            GlobalDecl::Union(_) => Ok(()),
             GlobalDecl::GlobalVar(ty, name, init, span) => {
+                self.check_type(ty, *span)?;
                 if *ty == Type::Auto {
                     return Err(Diagnostic::error_with_span(
                         "Global variables cannot use 'auto' type inference",
                         *span,
-                        "Global auto declaration",
+                        "Global auto declaration".to_string(),
                         &self.filename,
                     ));
                 }
-                self.variables.insert(name.clone(), ty.clone());
+                if let Some(existing_ty) = self.variables.lookup(name) {
+                    if existing_ty != *ty {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Redeclaration of global variable '{}' with conflicting type {:?}", name, ty),
+                            *span,
+                            "Conflicting redeclaration".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                } else {
+                    self.variables.insert(name.clone(), ty.clone());
+                }
                 if let Some(init_expr) = init {
                     let init_ty = self.check_expr(init_expr)?;
                     self.assert_assignable(ty, &init_ty, init_expr.span)?;
@@ -114,6 +147,10 @@ impl Typechecker {
                 Ok(())
             }
             GlobalDecl::Function(f) => {
+                self.check_type(&mut f.return_type, f.span)?;
+                for param in &mut f.params {
+                    self.check_type(&mut param.ty, f.span)?;
+                }
                 self.variables.enter_scope();
                 self.local_vars.enter_scope();
                 self.scope_depth = 1;
@@ -132,7 +169,7 @@ impl Typechecker {
                         return Err(Diagnostic::error_with_span(
                             format!("Function '{}' does not return a value on all control flow paths", f.name),
                             f.span,
-                            "Missing return in non-void function",
+                            "Missing return in non-void function".to_string(),
                             &self.filename,
                         ));
                     }
@@ -165,6 +202,7 @@ impl Typechecker {
                 Ok(())
             }
             StmtNode::Decl(ty, name, init) => {
+                self.check_type(ty, stmt.span)?;
                 let mut var_ty = ty.clone();
                 if let Some(init_expr) = init {
                     let init_ty = self.check_expr(init_expr)?;
@@ -340,7 +378,10 @@ impl Typechecker {
             },
             ExprNode::Identifier(name) => {
                 if let Some(ty) = self.variables.lookup(name) {
-                    ty
+                    match ty {
+                        Type::Array(inner, _) => Type::Pointer(inner),
+                        _ => ty,
+                    }
                 } else if let Some(decl) = self.functions.get(name).cloned() {
                     Type::Pointer(Box::new(decl.return_type))
                 } else {
@@ -592,72 +633,102 @@ impl Typechecker {
             }
             ExprNode::Call(callee, args) => {
                 let callee_ty = self.check_expr(callee)?;
-                if let ExprNode::Identifier(func_name) = &callee.node {
-                    if let Some(decl) = self.functions.get(func_name).cloned() {
-                        // Check arguments
-                        if decl.is_variadic {
-                            if args.len() < decl.params.len() {
-                                return Err(Diagnostic::error_with_span(
-                                    format!("Too few arguments to variadic function '{}'", func_name),
-                                    expr.span,
-                                    "Mismatched argument count",
-                                    &self.filename,
-                                ));
-                            }
-                        } else if args.len() != decl.params.len() {
-                            return Err(Diagnostic::error_with_span(
-                                format!("Function '{}' expects {} arguments, got {}", func_name, decl.params.len(), args.len()),
-                                expr.span,
-                                "Mismatched argument count",
-                                &self.filename,
-                            ));
-                        }
+                let is_variable = if let ExprNode::Identifier(func_name) = &callee.node {
+                    self.variables.lookup(func_name).is_some()
+                } else {
+                    false
+                };
 
-                        // Verify formats for printf/scanf family
-                        if func_name == "printf" || func_name == "sprintf" || func_name == "printf_s" {
-                            if !args.is_empty() {
-                                if let ExprNode::Literal(Literal::String(_)) = &args[0].node {
-                                    // Valid constant format string
-                                } else {
+                if let ExprNode::Identifier(func_name) = &callee.node {
+                    if !is_variable {
+                        if let Some(decl) = self.functions.get(func_name).cloned() {
+                            // Check arguments
+                            if decl.is_variadic {
+                                if args.len() < decl.params.len() {
                                     return Err(Diagnostic::error_with_span(
-                                        "Format string argument must be a compile-time string literal to prevent exploits",
-                                        args[0].span,
-                                        "Format string validation",
+                                        format!("Too few arguments to variadic function '{}'", func_name),
+                                        expr.span,
+                                        "Mismatched argument count".to_string(),
                                         &self.filename,
                                     ));
                                 }
+                            } else if args.len() != decl.params.len() {
+                                return Err(Diagnostic::error_with_span(
+                                    format!("Function '{}' expects {} arguments, got {}", func_name, decl.params.len(), args.len()),
+                                    expr.span,
+                                    "Mismatched argument count".to_string(),
+                                    &self.filename,
+                                ));
                             }
-                        }
 
-                        for (i, arg) in args.iter_mut().enumerate() {
-                            let arg_ty = self.check_expr(arg)?;
-                            if i < decl.params.len() {
-                                self.assert_assignable(&decl.params[i].ty, &arg_ty, arg.span)?;
+                            // Verify formats for printf/scanf family
+                            if func_name == "printf" || func_name == "sprintf" || func_name == "printf_s" {
+                                let fmt_arg_idx = if func_name == "sprintf" { 1 } else { 0 };
+                                if args.len() > fmt_arg_idx {
+                                    if let ExprNode::Literal(Literal::String(fmt)) = &args[fmt_arg_idx].node {
+                                        let fmt_str = fmt.clone();
+                                        self.validate_format_string(&fmt_str, args, fmt_arg_idx, expr.span)?;
+                                    } else {
+                                        return Err(Diagnostic::error_with_span(
+                                            "Format string argument must be a compile-time string literal to prevent exploits".to_string(),
+                                            args[fmt_arg_idx].span,
+                                            "Format string validation".to_string(),
+                                            &self.filename,
+                                        ));
+                                    }
+                                }
                             }
+
+                            for (i, arg) in args.iter_mut().enumerate() {
+                                let arg_ty = self.check_expr(arg)?;
+                                if i < decl.params.len() {
+                                    self.assert_assignable(&decl.params[i].ty, &arg_ty, arg.span)?;
+                                }
+                            }
+                            decl.return_type.clone()
+                        } else {
+                            return Err(Diagnostic::error_with_span(
+                                format!("Calling undefined function '{}'", func_name),
+                                expr.span,
+                                "Undefined function call".to_string(),
+                                &self.filename,
+                            ));
                         }
-                        decl.return_type.clone()
                     } else {
-                        return Err(Diagnostic::error_with_span(
-                            format!("Calling undefined function '{}'", func_name),
-                            expr.span,
-                            "Undefined function call",
-                            &self.filename,
-                        ));
+                        // It is a variable, treat it as a function pointer
+                        if let Type::Pointer(inner) = callee_ty {
+                            for arg in args.iter_mut() {
+                                self.check_expr(arg)?;
+                            }
+                            if let Type::Void = *inner {
+                                Type::Void
+                            } else {
+                                Type::Int
+                            }
+                        } else {
+                            return Err(Diagnostic::error_with_span(
+                                "Callee is not a function or function pointer",
+                                callee.span,
+                                "Invalid callee type".to_string(),
+                                &self.filename,
+                            ));
+                        }
                     }
                 } else if let Type::Pointer(inner) = callee_ty {
                     // Call via function pointer
-                    // CFI check is generated in codegen, here we just return the return type
+                    for arg in args.iter_mut() {
+                        self.check_expr(arg)?;
+                    }
                     if let Type::Void = *inner {
                         Type::Void
                     } else {
-                        // Fallback function signature
                         Type::Int
                     }
                 } else {
                     return Err(Diagnostic::error_with_span(
                         "Callee is not a function or function pointer",
                         callee.span,
-                        "Invalid callee type",
+                        "Invalid callee type".to_string(),
                         &self.filename,
                     ));
                 }
@@ -669,7 +740,15 @@ impl Typechecker {
                     return Err(Diagnostic::error_with_span(
                         "Casting integer to pointer is disallowed in Safe C mode by default",
                         expr.span,
-                        "Unsafe integer-to-pointer cast",
+                        "Unsafe integer-to-pointer cast".to_string(),
+                        &self.filename,
+                    ));
+                }
+                if self.has_const(&inner_ty) && !self.has_const(cast_ty) {
+                    return Err(Diagnostic::error_with_span(
+                        "Casting away constness is disallowed in Safe C mode",
+                        expr.span,
+                        "Const qualifier discarded".to_string(),
                         &self.filename,
                     ));
                 }
@@ -684,7 +763,7 @@ impl Typechecker {
                         return Err(Diagnostic::error_with_span(
                             "LHS of '->' must be a pointer",
                             inner.span,
-                            "Non-pointer arrow access",
+                            "Non-pointer arrow access".to_string(),
                             &self.filename,
                         ));
                     }
@@ -698,7 +777,7 @@ impl Typechecker {
                             return Err(Diagnostic::error_with_span(
                                 format!("Struct '{}' has no member named '{}'", struct_name, member_name),
                                 expr.span,
-                                "Unknown struct field",
+                                "Unknown struct field".to_string(),
                                 &self.filename,
                             ));
                         }
@@ -706,15 +785,35 @@ impl Typechecker {
                         return Err(Diagnostic::error_with_span(
                             format!("Struct '{}' is not defined", struct_name),
                             expr.span,
-                            "Undefined struct",
+                            "Undefined struct".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                } else if let Type::Union(union_name) = inner_ty {
+                    if let Some(decl) = self.unions.get(&union_name) {
+                        if let Some(field) = decl.fields.iter().find(|f| f.name == *member_name) {
+                            field.ty.clone()
+                        } else {
+                            return Err(Diagnostic::error_with_span(
+                                format!("Union '{}' has no member named '{}'", union_name, member_name),
+                                expr.span,
+                                "Unknown union field".to_string(),
+                                &self.filename,
+                            ));
+                        }
+                    } else {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Union '{}' is not defined", union_name),
+                            expr.span,
+                            "Undefined union".to_string(),
                             &self.filename,
                         ));
                     }
                 } else {
                     return Err(Diagnostic::error_with_span(
-                        "LHS of field access must be a struct type",
+                        "LHS of field access must be a struct or union type",
                         inner.span,
-                        "Invalid field access target",
+                        "Invalid field access target".to_string(),
                         &self.filename,
                     ));
                 }
@@ -764,12 +863,27 @@ impl Typechecker {
 
         // Implicit void* conversions
         if let Type::Pointer(inner_dest) = dest {
-            if **inner_dest == Type::Void && src.is_pointer() {
+            if *self.unwrap_const(inner_dest) == Type::Void && src.is_pointer() {
                 return Ok(());
             }
         }
         if let Type::Pointer(inner_src) = src {
-            if **inner_src == Type::Void && dest.is_pointer() {
+            if *self.unwrap_const(inner_src) == Type::Void && dest.is_pointer() {
+                return Ok(());
+            }
+        }
+
+        // Implicit pointer conversions with qualification changes (const addition)
+        if let (Type::Pointer(inner_dest), Type::Pointer(inner_src)) = (dest, src) {
+            if self.unwrap_const(inner_dest) == self.unwrap_const(inner_src) {
+                if self.has_const(inner_src) && !self.has_const(inner_dest) {
+                    return Err(Diagnostic::error_with_span(
+                        format!("Incompatible pointer conversion: cannot implicitly discard const qualifier in assignment from {:?} to {:?}", src, dest),
+                        span,
+                        "Type incompatibility",
+                        &self.filename,
+                    ));
+                }
                 return Ok(());
             }
         }
@@ -813,6 +927,165 @@ impl Typechecker {
             StmtNode::Default(body) => self.check_definite_return(body),
             StmtNode::Unsafe(body) => self.check_definite_return(body),
             _ => false,
+        }
+    }
+
+    fn has_const(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Const(_) => true,
+            Type::Pointer(inner) => self.has_const(inner),
+            Type::Array(inner, _) => self.has_const(inner),
+            _ => false,
+        }
+    }
+
+    fn check_type(&mut self, ty: &mut Type, span: Span) -> Result<(), Diagnostic> {
+        match ty {
+            Type::Pointer(inner) => self.check_type(inner, span),
+            Type::Array(inner, size) => {
+                self.check_type(inner, span)?;
+                if let ArraySize::Variable(expr) = size {
+                    let expr_ty = self.check_expr(expr)?;
+                    if !expr_ty.is_integer() {
+                        return Err(Diagnostic::error_with_span(
+                            "Variable-length array size must be of integer type",
+                            expr.span,
+                            "Non-integer VLA size".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Type::Const(inner) => self.check_type(inner, span),
+            Type::Atomic(inner) => self.check_type(inner, span),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_format_string(&mut self, fmt: &str, args: &mut [Expr], fmt_arg_idx: usize, span: Span) -> Result<(), Diagnostic> {
+        let mut specifiers = Vec::new();
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                if let Some(&next_c) = chars.peek() {
+                    if next_c == '%' {
+                        chars.next();
+                        continue;
+                    }
+                }
+                let mut spec = String::new();
+                while let Some(&next_c) = chars.peek() {
+                    if next_c.is_alphabetic() || next_c == '*' || next_c == '.' || next_c.is_digit(10) || next_c == '-' || next_c == '+' {
+                        spec.push(next_c);
+                        chars.next();
+                        if next_c.is_alphabetic() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                specifiers.push(spec);
+            }
+        }
+
+        let mut arg_idx = fmt_arg_idx + 1;
+        for spec in specifiers {
+            if spec.contains('*') {
+                if arg_idx >= args.len() {
+                    return Err(Diagnostic::error_with_span(
+                        "Mismatched printf arguments (missing argument for '*')".to_string(),
+                        span,
+                        "Format mismatch".to_string(),
+                        &self.filename,
+                    ));
+                }
+                let arg_ty = self.check_expr(&mut args[arg_idx])?;
+                if !arg_ty.is_integer() {
+                    return Err(Diagnostic::error_with_span(
+                        format!("Expected integer for '*' specifier, found {:?}", arg_ty),
+                        args[arg_idx].span,
+                        "Format mismatch".to_string(),
+                        &self.filename,
+                    ));
+                }
+                arg_idx += 1;
+            }
+
+            if arg_idx >= args.len() {
+                return Err(Diagnostic::error_with_span(
+                    format!("Mismatched printf arguments: expected more arguments for specifier %{}", spec),
+                    span,
+                    "Format mismatch".to_string(),
+                    &self.filename,
+                ));
+            }
+
+            let arg_ty = self.check_expr(&mut args[arg_idx])?;
+            let last_char = spec.chars().last().unwrap_or(' ');
+            match last_char {
+                'd' | 'i' | 'o' | 'u' | 'x' | 'X' | 'c' => {
+                    if !arg_ty.is_integer() {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Format specifier %{} expects integer, found {:?}", spec, arg_ty),
+                            args[arg_idx].span,
+                            "Format mismatch".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                }
+                'f' | 'e' | 'E' | 'g' | 'G' => {
+                    if !arg_ty.is_floating() {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Format specifier %{} expects floating point, found {:?}", spec, arg_ty),
+                            args[arg_idx].span,
+                            "Format mismatch".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                }
+                's' => {
+                    if !arg_ty.is_pointer() {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Format specifier %{} expects string pointer, found {:?}", spec, arg_ty),
+                            args[arg_idx].span,
+                            "Format mismatch".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                }
+                'p' => {
+                    if !arg_ty.is_pointer() {
+                        return Err(Diagnostic::error_with_span(
+                            format!("Format specifier %{} expects pointer, found {:?}", spec, arg_ty),
+                            args[arg_idx].span,
+                            "Format mismatch".to_string(),
+                            &self.filename,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            arg_idx += 1;
+        }
+
+        if arg_idx < args.len() {
+            return Err(Diagnostic::error_with_span(
+                "Mismatched printf arguments: too many arguments provided".to_string(),
+                span,
+                "Format mismatch".to_string(),
+                &self.filename,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn unwrap_const<'b>(&self, ty: &'b Type) -> &'b Type {
+        match ty {
+            Type::Const(inner) => self.unwrap_const(inner),
+            _ => ty,
         }
     }
 }

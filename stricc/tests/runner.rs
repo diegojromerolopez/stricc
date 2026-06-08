@@ -168,6 +168,36 @@ fn test_safety_matrix() {
             expected_error: Some("does not return a value on all control flow paths"),
             expected_abort: None,
         },
+        TestCase {
+            name: "float_overflow",
+            file_path: "stricc/tests/safety/float_overflow.c",
+            expected_error: None,
+            expected_abort: Some("Floating point overflow or NaN"),
+        },
+        TestCase {
+            name: "uninit",
+            file_path: "stricc/tests/safety/uninit.c",
+            expected_error: None,
+            expected_abort: Some("Division by zero"),
+        },
+        TestCase {
+            name: "unaligned",
+            file_path: "stricc/tests/safety/unaligned.c",
+            expected_error: None,
+            expected_abort: Some("Unaligned memory access"),
+        },
+        TestCase {
+            name: "float_to_int",
+            file_path: "stricc/tests/safety/float_to_int.c",
+            expected_error: None,
+            expected_abort: Some("Float-to-int conversion overflow"),
+        },
+        TestCase {
+            name: "div_overflow",
+            file_path: "stricc/tests/safety/div_overflow.c",
+            expected_error: None,
+            expected_abort: Some("Division overflow"),
+        },
     ];
 
     for case in &test_cases {
@@ -197,6 +227,72 @@ fn test_defined_behavior() {
             name: "shift_constant_error",
             file_path: "stricc/tests/defined/shift_constant_error.c",
             expected_error: Some("Shift count 35 is out of bounds for type Int"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "wrap_overflow",
+            file_path: "stricc/tests/defined/wrap_overflow.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "overlap_memcpy",
+            file_path: "stricc/tests/defined/overlap_memcpy.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "null_memcpy_zero",
+            file_path: "stricc/tests/defined/null_memcpy_zero.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "pointer_compare",
+            file_path: "stricc/tests/defined/pointer_compare.c",
+            expected_error: None,
+            expected_abort: None,
+        },
+        TestCase {
+            name: "cfi_mismatch",
+            file_path: "stricc/tests/defined/cfi_mismatch.c",
+            expected_error: None,
+            expected_abort: Some("CFI violation"),
+        },
+        TestCase {
+            name: "string_bounds",
+            file_path: "stricc/tests/defined/string_bounds.c",
+            expected_error: None,
+            expected_abort: Some("String not null-terminated within bounds in strlen"),
+        },
+        TestCase {
+            name: "ctype_range",
+            file_path: "stricc/tests/defined/ctype_range.c",
+            expected_error: None,
+            expected_abort: Some("ctype.h argument out of range"),
+        },
+        TestCase {
+            name: "invalid_cast",
+            file_path: "stricc/tests/defined/invalid_cast.c",
+            expected_error: Some("Const qualifier discarded"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "format_mismatch",
+            file_path: "stricc/tests/defined/format_mismatch.c",
+            expected_error: Some("Format specifier %s expects string pointer"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "link_mismatch",
+            file_path: "stricc/tests/defined/link_mismatch.c",
+            expected_error: Some("Redeclaration of global variable"),
+            expected_abort: None,
+        },
+        TestCase {
+            name: "union_mismatch",
+            file_path: "stricc/tests/defined/union_mismatch.c",
+            expected_error: None,
             expected_abort: None,
         },
     ];

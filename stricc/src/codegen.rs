@@ -3,7 +3,7 @@ use crate::error::Span;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Module, Linkage};
-use inkwell::types::{BasicType, BasicTypeEnum, FunctionType, StructType};
+use inkwell::types::{BasicType, BasicTypeEnum, FunctionType, StructType, IntType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, InstructionValue, PointerValue, IntValue, FloatValue};
 use inkwell::IntPredicate;
 use inkwell::AddressSpace;
@@ -17,16 +17,22 @@ pub struct Codegen<'a, 'ctx> {
     
     // Symbol tables
     variables: HashMap<String, PointerValue<'ctx>>,
+    variable_types: HashMap<String, Type>,
     // Pointer metadata mappings: local pointer variable name -> (base_alloca, size_alloca, key_alloca)
     pointer_metadata: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
+    stack_allocations: Vec<PointerValue<'ctx>>,
     
     struct_types: HashMap<String, StructType<'ctx>>,
+    unions: HashMap<String, StructDecl>,
+    structs: HashMap<String, StructDecl>,
     
     // Runtime functions
     abort_fn: FunctionValue<'ctx>,
     shadow_load_fn: FunctionValue<'ctx>,
     shadow_store_fn: FunctionValue<'ctx>,
     check_bounds_fn: FunctionValue<'ctx>,
+    cfi_register_fn: FunctionValue<'ctx>,
+    cfi_check_fn: FunctionValue<'ctx>,
     current_fn: Option<FunctionValue<'ctx>>,
 }
 
@@ -76,18 +82,32 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         );
         let check_bounds_fn = module.add_function("__stricc_rt_check_bounds", check_bounds_fn_type, Some(Linkage::External));
 
+        // void __stricc_rt_cfi_register(void* func_ptr, uint64_t signature_hash)
+        let cfi_register_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let cfi_register_fn = module.add_function("__stricc_rt_cfi_register", cfi_register_fn_type, Some(Linkage::External));
+
+        // void __stricc_rt_cfi_check(void* func_ptr, uint64_t expected_hash)
+        let cfi_check_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let cfi_check_fn = module.add_function("__stricc_rt_cfi_check", cfi_check_fn_type, Some(Linkage::External));
+
         Self {
             context,
             module,
             builder,
             filename: filename.to_string(),
             variables: HashMap::new(),
+            variable_types: HashMap::new(),
             pointer_metadata: HashMap::new(),
+            stack_allocations: Vec::new(),
             struct_types: HashMap::new(),
+            unions: HashMap::new(),
+            structs: HashMap::new(),
             abort_fn,
             shadow_load_fn,
             shadow_store_fn,
             check_bounds_fn,
+            cfi_register_fn,
+            cfi_check_fn,
             current_fn: None,
         }
     }
@@ -103,31 +123,112 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             Type::Float => self.context.f32_type().into(),
             Type::Double => self.context.f64_type().into(),
             Type::Pointer(_) | Type::Nullptr => self.context.ptr_type(AddressSpace::default()).into(),
-            Type::Array(inner, size) => self.get_llvm_type(inner).array_type(*size as u32).into(),
+            Type::Array(inner, size) => match size {
+                ArraySize::Const(len) => self.get_llvm_type(inner).array_type(*len as u32).into(),
+                ArraySize::Variable(_) => self.context.ptr_type(AddressSpace::default()).into(),
+            },
             Type::Struct(name) => self.struct_types.get(name).cloned().expect("Struct not declared").into(),
             Type::Union(name) => self.struct_types.get(name).cloned().expect("Union not declared").into(),
             Type::Enum(_) => self.context.i32_type().into(),
             Type::Auto => panic!("Unresolved auto type during codegen"),
             Type::TypeofExpression(_) | Type::TypeofType(_) => panic!("Unresolved typeof type during codegen"),
             Type::Atomic(inner) => self.get_llvm_type(inner),
+            Type::Const(inner) => self.get_llvm_type(inner),
         }
     }
 
     pub fn gen_program(&mut self, program: &Program) {
-        // Pre-declare structs and unions
+        // Populate structs and unions mapping
         for decl in &program.decls {
-            if let GlobalDecl::Struct(s) = decl {
-                let struct_type = self.context.opaque_struct_type(&s.name);
-                self.struct_types.insert(s.name.clone(), struct_type);
+            match decl {
+                GlobalDecl::Struct(s) => {
+                    self.structs.insert(s.name.clone(), s.clone());
+                }
+                GlobalDecl::Union(u) => {
+                    self.unions.insert(u.name.clone(), u.clone());
+                }
+                _ => {}
             }
         }
 
-        // Fill struct fields
+        // Pre-declare structs and unions
         for decl in &program.decls {
-            if let GlobalDecl::Struct(s) = decl {
-                let struct_type = self.struct_types.get(&s.name).unwrap();
-                let field_types: Vec<BasicTypeEnum> = s.fields.iter().map(|f| self.get_llvm_type(&f.ty)).collect();
-                struct_type.set_body(&field_types, false);
+            match decl {
+                GlobalDecl::Struct(s) => {
+                    let struct_type = self.context.opaque_struct_type(&s.name);
+                    self.struct_types.insert(s.name.clone(), struct_type);
+                }
+                GlobalDecl::Union(u) => {
+                    let union_type = self.context.opaque_struct_type(&u.name);
+                    self.struct_types.insert(u.name.clone(), union_type);
+                }
+                _ => {}
+            }
+        }
+
+        // Fill struct and union bodies
+        for decl in &program.decls {
+            match decl {
+                GlobalDecl::Struct(s) => {
+                    let struct_type = self.struct_types.get(&s.name).unwrap();
+                    let field_types: Vec<BasicTypeEnum> = s.fields.iter().map(|f| self.get_llvm_type(&f.ty)).collect();
+                    struct_type.set_body(&field_types, false);
+                }
+                GlobalDecl::Union(u) => {
+                    let struct_type = self.struct_types.get(&u.name).unwrap();
+                    let (total_size, max_align) = self.get_type_size_and_align(&Type::Union(u.name.clone()));
+                    let align_ty = if max_align >= 8 {
+                        self.context.i64_type().into()
+                    } else if max_align == 4 {
+                        self.context.i32_type().into()
+                    } else if max_align == 2 {
+                        self.context.i16_type().into()
+                    } else {
+                        self.context.i8_type().into()
+                    };
+                    let align_size = max_align;
+                    let body = if total_size <= align_size {
+                        vec![align_ty]
+                    } else {
+                        let padding_size = total_size - align_size;
+                        let padding_ty = self.context.i8_type().array_type(padding_size as u32).into();
+                        vec![align_ty, padding_ty]
+                    };
+                    struct_type.set_body(&body, false);
+                }
+                _ => {}
+            }
+        }
+
+        // Pre-declare all functions and collect those with a body
+        let mut defined_functions = Vec::new();
+        for decl in &program.decls {
+            if let GlobalDecl::Function(f) = decl {
+                let return_type = if f.return_type == Type::Void {
+                    None
+                } else {
+                    Some(self.get_llvm_type(&f.return_type))
+                };
+                let param_types: Vec<BasicTypeEnum> = f.params.iter().map(|p| self.get_llvm_type(&p.ty)).collect();
+                let fn_type = match return_type {
+                    Some(rt) => rt.fn_type(
+                        &param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
+                        f.is_variadic,
+                    ),
+                    None => self.context.void_type().fn_type(
+                        &param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
+                        f.is_variadic,
+                    ),
+                };
+                
+                if self.module.get_function(&f.name).is_none() {
+                    self.module.add_function(&f.name, fn_type, None);
+                }
+
+                if f.body.is_some() {
+                    let sig_hash = self.compute_signature_hash(&f.return_type, &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>());
+                    defined_functions.push((f.name.clone(), sig_hash));
+                }
             }
         }
 
@@ -136,10 +237,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             match decl {
                 GlobalDecl::GlobalVar(ty, name, init, _) => {
                     let llvm_ty = self.get_llvm_type(ty);
-                    let global = self.module.add_global(llvm_ty, None, name);
+                    let global = if let Some(g) = self.module.get_global(name) {
+                        g
+                    } else {
+                        self.module.add_global(llvm_ty, None, name)
+                    };
                     global.set_linkage(Linkage::External);
                     if let Some(init_expr) = init {
-                        // For simple global initialization, evaluate lit
                         if let ExprNode::Literal(lit) = &init_expr.node {
                             match lit {
                                 Literal::Int(v) => global.set_initializer(&self.context.i32_type().const_int(*v as u64, false)),
@@ -150,38 +254,19 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                             }
                         }
                     } else {
-                        // Zero initialize by default
                         global.set_initializer(&llvm_ty.const_zero());
                     }
                 }
                 GlobalDecl::Function(f) => {
-                    self.gen_function(f);
+                    self.gen_function(f, &defined_functions);
                 }
                 _ => {}
             }
         }
     }
 
-    fn gen_function(&mut self, f: &FunctionDecl) {
-        let return_type = if f.return_type == Type::Void {
-            None
-        } else {
-            Some(self.get_llvm_type(&f.return_type))
-        };
-
-        let param_types: Vec<BasicTypeEnum> = f.params.iter().map(|p| self.get_llvm_type(&p.ty)).collect();
-        let fn_type = match return_type {
-            Some(rt) => rt.fn_type(
-                &param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
-                f.is_variadic,
-            ),
-            None => self.context.void_type().fn_type(
-                &param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
-                f.is_variadic,
-            ),
-        };
-
-        let func = self.module.add_function(&f.name, fn_type, None);
+    fn gen_function(&mut self, f: &FunctionDecl, defined_functions: &[(String, u64)]) {
+        let func = self.module.get_function(&f.name).unwrap();
         self.current_fn = Some(func);
 
         if let Some(body) = &f.body {
@@ -189,7 +274,21 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             self.builder.position_at_end(entry_block);
 
             self.variables.clear();
+            self.variable_types.clear();
             self.pointer_metadata.clear();
+            self.stack_allocations.clear();
+
+            // Register all defined functions in main's entry block for CFI
+            if f.name == "main" {
+                for (fn_name, hash) in defined_functions {
+                    if let Some(target_fn) = self.module.get_function(fn_name) {
+                        let func_ptr = target_fn.as_global_value().as_pointer_value();
+                        let func_ptr_cast = self.builder.build_pointer_cast(func_ptr, self.context.ptr_type(AddressSpace::default()), "fn_ptr_cast").unwrap();
+                        let hash_val = self.context.i64_type().const_int(*hash, false);
+                        self.builder.build_call(self.cfi_register_fn, &[func_ptr_cast.into(), hash_val.into()], "cfi_reg").unwrap();
+                    }
+                }
+            }
 
             // Allocate and store parameter variables
             for (i, param) in f.params.iter().enumerate() {
@@ -198,6 +297,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 let val = func.get_nth_param(i as u32).unwrap();
                 self.builder.build_store(param_alloca, val).unwrap();
                 self.variables.insert(param.name.clone(), param_alloca);
+                self.variable_types.insert(param.name.clone(), param.ty.clone());
 
                 if param.ty.is_pointer() {
                     // For parameters, map their metadata to wildcard/infinite by default
@@ -221,12 +321,26 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
             // Append safety return if none exists
             if f.return_type == Type::Void {
-                self.builder.build_return(None).unwrap();
+                if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    let zero = self.context.i64_type().const_zero();
+                    for &ptr in &self.stack_allocations {
+                        let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                        self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
+                    }
+                    self.builder.build_return(None).unwrap();
+                }
             } else {
                 // If the block is not terminated, return zero/null fallback
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                    let zero = self.get_llvm_type(&f.return_type).const_zero();
-                    self.builder.build_return(Some(&zero)).unwrap();
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    let zero = self.context.i64_type().const_zero();
+                    for &ptr in &self.stack_allocations {
+                        let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                        self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
+                    }
+                    let zero_val = self.get_llvm_type(&f.return_type).const_zero();
+                    self.builder.build_return(Some(&zero_val)).unwrap();
                 }
             }
         }
@@ -243,26 +357,103 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.gen_expr(expr);
             }
             StmtNode::Decl(ty, name, init) => {
-                let llvm_ty = self.get_llvm_type(ty);
-                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
-                self.variables.insert(name.clone(), alloca);
+                let alloca = match ty {
+                    Type::Array(inner, ArraySize::Variable(size_expr)) => {
+                        let func = self.current_fn.unwrap();
+                        let size_val = self.gen_expr(size_expr).into_int_value();
+                        
+                        // Check VLA size > 0
+                        let is_le_zero = self.builder.build_int_compare(
+                            IntPredicate::SLE,
+                            size_val,
+                            size_val.get_type().const_zero(),
+                            "vla_size_le_zero"
+                        ).unwrap();
+                        
+                        let abort_bb = self.context.append_basic_block(func, "vla_abort");
+                        let cont_bb = self.context.append_basic_block(func, "vla_cont");
+                        self.builder.build_conditional_branch(is_le_zero, abort_bb, cont_bb).unwrap();
+                        
+                        self.builder.position_at_end(abort_bb);
+                        let msg = self.builder.build_global_string_ptr("Invalid VLA size", "msg").unwrap();
+                        let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+                        let line = self.context.i32_type().const_int(0, false);
+                        self.builder.build_call(self.abort_fn, &[msg.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+                        self.builder.build_unreachable().unwrap();
+                        
+                        self.builder.position_at_end(cont_bb);
+                        
+                        let inner_llvm_ty = self.get_llvm_type(inner);
+                        self.builder.build_array_alloca(inner_llvm_ty, size_val, name).unwrap()
+                    }
+                    _ => {
+                        let llvm_ty = self.get_llvm_type(ty);
+                        self.builder.build_alloca(llvm_ty, name).unwrap()
+                    }
+                };
 
-                if ty.is_pointer() {
+                self.variables.insert(name.clone(), alloca);
+                self.variable_types.insert(name.clone(), ty.clone());
+
+                if ty.is_pointer() || matches!(ty, Type::Array(_, _)) {
                     let base_alloca = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", name)).unwrap();
                     let size_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_size", name)).unwrap();
                     let key_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_key", name)).unwrap();
                     
                     self.pointer_metadata.insert(name.clone(), (base_alloca, size_alloca, key_alloca));
 
-                    // Default initialize pointer to nullptr
-                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                    self.builder.build_store(alloca, null_ptr).unwrap();
-                    self.builder.build_store(base_alloca, null_ptr).unwrap();
-                    self.builder.build_store(size_alloca, self.context.i64_type().const_zero()).unwrap();
+                    let array_ptr_cast = self.builder.build_pointer_cast(alloca, self.context.ptr_type(AddressSpace::default()), "array_ptr_cast").unwrap();
+                    self.builder.build_store(base_alloca, array_ptr_cast).unwrap();
                     self.builder.build_store(key_alloca, self.context.i64_type().const_zero()).unwrap();
+
+                    let total_size_val = match ty {
+                        Type::Array(inner, ArraySize::Const(len)) => {
+                            let (elem_sz, _) = self.get_type_size_and_align(inner);
+                            let total_size = len * elem_sz;
+                            let sz_val = self.context.i64_type().const_int(total_size as u64, false);
+                            self.builder.build_store(size_alloca, sz_val).unwrap();
+                            sz_val
+                        }
+                        Type::Array(inner, ArraySize::Variable(size_expr)) => {
+                            let size_val = self.gen_expr(size_expr).into_int_value();
+                            let size_val_i64 = if size_val.get_type().get_bit_width() < 64 {
+                                self.builder.build_int_z_extend(size_val, self.context.i64_type(), "size_extend").unwrap()
+                            } else if size_val.get_type().get_bit_width() > 64 {
+                                self.builder.build_int_truncate(size_val, self.context.i64_type(), "size_trunc").unwrap()
+                            } else {
+                                size_val
+                            };
+                            let (elem_sz, _) = self.get_type_size_and_align(inner);
+                            let elem_size_val = self.context.i64_type().const_int(elem_sz as u64, false);
+                            let tot_sz = self.builder.build_int_mul(size_val_i64, elem_size_val, "vla_total_size").unwrap();
+                            self.builder.build_store(size_alloca, tot_sz).unwrap();
+                            tot_sz
+                        }
+                        _ => {
+                            let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                            self.builder.build_store(alloca, null_ptr).unwrap();
+                            self.builder.build_store(base_alloca, null_ptr).unwrap();
+                            self.builder.build_store(size_alloca, self.context.i64_type().const_zero()).unwrap();
+                            self.context.i64_type().const_zero()
+                        }
+                    };
+
+                    // Register in SHADOW_TABLE
+                    self.builder.build_call(
+                        self.shadow_store_fn,
+                        &[
+                            array_ptr_cast.into(),
+                            array_ptr_cast.into(),
+                            total_size_val.into(),
+                            self.context.i64_type().const_zero().into(),
+                        ],
+                        "shadow_store",
+                    ).unwrap();
+
+                    self.stack_allocations.push(alloca);
                 } else {
                     // Zero initialize scalar variables
-                    self.builder.build_store(alloca, llvm_ty.const_zero()).unwrap();
+                    self.builder.build_store(alloca, self.get_llvm_type(ty).const_zero()).unwrap();
                 }
 
                 if let Some(init_expr) = init {
@@ -281,13 +472,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             StmtNode::If(cond, then_branch, else_branch) => {
                 let cond_val = self.gen_expr(cond).into_int_value();
+                let cond_val_i1 = if cond_val.get_type() == self.context.bool_type() {
+                    cond_val
+                } else {
+                    self.builder.build_int_compare(IntPredicate::NE, cond_val, cond_val.get_type().const_zero(), "cond_bool").unwrap()
+                };
                 let func = self.current_fn.unwrap();
 
                 let then_bb = self.context.append_basic_block(func, "then");
                 let else_bb = self.context.append_basic_block(func, "else");
                 let merge_bb = self.context.append_basic_block(func, "ifcont");
 
-                self.builder.build_conditional_branch(cond_val, then_bb, else_bb).unwrap();
+                self.builder.build_conditional_branch(cond_val_i1, then_bb, else_bb).unwrap();
 
                 // Generate then block
                 self.builder.position_at_end(then_bb);
@@ -318,7 +514,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // Condition block
                 self.builder.position_at_end(cond_bb);
                 let cond_val = self.gen_expr(cond).into_int_value();
-                self.builder.build_conditional_branch(cond_val, body_bb, merge_bb).unwrap();
+                let cond_val_i1 = if cond_val.get_type() == self.context.bool_type() {
+                    cond_val
+                } else {
+                    self.builder.build_int_compare(IntPredicate::NE, cond_val, cond_val.get_type().const_zero(), "cond_bool").unwrap()
+                };
+                self.builder.build_conditional_branch(cond_val_i1, body_bb, merge_bb).unwrap();
 
                 // Body block
                 self.builder.position_at_end(body_bb);
@@ -330,6 +531,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.position_at_end(merge_bb);
             }
             StmtNode::Return(val) => {
+                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                let zero = self.context.i64_type().const_zero();
+                for &ptr in &self.stack_allocations {
+                    let ptr_cast = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                    self.builder.build_call(self.shadow_store_fn, &[ptr_cast.into(), null_ptr.into(), zero.into(), zero.into()], "shadow_unreg").unwrap();
+                }
+
                 if let Some(expr) = val {
                     let ret_val = self.gen_expr(expr);
                     self.builder.build_return(Some(&ret_val)).unwrap();
@@ -359,9 +567,31 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 Literal::Bool(v) => self.context.bool_type().const_int(if *v { 1 } else { 0 }, false).into(),
             },
             ExprNode::Identifier(name) => {
-                let ptr = *self.variables.get(name).expect("Undeclared variable in codegen");
-                let llvm_ty = self.get_llvm_type(expr.ty.as_ref().unwrap());
-                self.builder.build_load(llvm_ty, ptr, name).unwrap()
+                if let Some(ptr) = self.variables.get(name) {
+                    let ptr = *ptr;
+                    let var_ty = self.variable_types.get(name).unwrap();
+                    match var_ty {
+                        Type::Array(inner, size) => {
+                            match size {
+                                ArraySize::Const(_) => {
+                                    self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), name).unwrap().into()
+                                }
+                                ArraySize::Variable(_) => {
+                                    ptr.into()
+                                }
+                            }
+                        }
+                        _ => {
+                            let llvm_ty = self.get_llvm_type(expr.ty.as_ref().unwrap());
+                            self.builder.build_load(llvm_ty, ptr, name).unwrap()
+                        }
+                    }
+                } else if let Some(target_fn) = self.module.get_function(name) {
+                    let func_ptr = target_fn.as_global_value().as_pointer_value();
+                    func_ptr.as_basic_value_enum()
+                } else {
+                    panic!("Undeclared variable or function '{}' in codegen", name);
+                }
             }
             ExprNode::Assign(left, right) => {
                 let right_val = self.gen_expr(right);
@@ -384,12 +614,40 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
                     self.emit_bounds_check(dest_ptr, base, size, key, access_size, expr.span);
 
+                    // Alignment check before store
+                    self.emit_alignment_check(dest_ptr, left.ty.as_ref().unwrap(), expr.span);
+
                     self.builder.build_store(dest_ptr, right_val).unwrap();
 
                     // If storing a pointer into memory, save metadata to shadow memory
                     if expr.ty.as_ref().unwrap().is_pointer() {
                         let (stored_base, stored_size, stored_key) = self.get_expr_pointer_metadata_with_val(right, Some(right_val));
                         let ptr_addr_cast = self.builder.build_pointer_cast(dest_ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                        let base_cast = self.builder.build_pointer_cast(stored_base.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "base_cast").unwrap();
+                        self.builder.build_call(
+                            self.shadow_store_fn,
+                            &[
+                                ptr_addr_cast.into(),
+                                base_cast.into(),
+                                stored_size.into(),
+                                stored_key.into(),
+                            ],
+                            "shadow_store",
+                        ).unwrap();
+                    }
+                } else if let ExprNode::Member(inner, member_name, is_arrow) = &left.node {
+                    let member_ptr = self.gen_member_pointer(inner, member_name, *is_arrow);
+                    let member_ty = left.ty.as_ref().unwrap();
+
+                    // Alignment check before store
+                    self.emit_alignment_check(member_ptr, member_ty, expr.span);
+
+                    self.builder.build_store(member_ptr, right_val).unwrap();
+
+                    // If storing a pointer into memory, save metadata to shadow memory
+                    if expr.ty.as_ref().unwrap().is_pointer() {
+                        let (stored_base, stored_size, stored_key) = self.get_expr_pointer_metadata_with_val(right, Some(right_val));
+                        let ptr_addr_cast = self.builder.build_pointer_cast(member_ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
                         let base_cast = self.builder.build_pointer_cast(stored_base.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "base_cast").unwrap();
                         self.builder.build_call(
                             self.shadow_store_fn,
@@ -423,11 +681,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                             let right_int = right_val.into_int_value();
                             let result = unsafe { self.builder.build_gep(self.context.i8_type(), left_ptr, &[right_int], "ptr_add").unwrap() };
                             result.into()
+                        } else if ty.is_floating() {
+                            let res = self.builder.build_float_add(left_val.into_float_value(), right_val.into_float_value(), "fadd").unwrap();
+                            self.emit_float_overflow_check(res, expr.span);
+                            res.into()
                         } else {
-                            // Signed add with overflow check
                             let left_int = left_val.into_int_value();
                             let right_int = right_val.into_int_value();
-                            self.emit_checked_arithmetic("llvm.sadd.with.overflow.i32", left_int, right_int, expr.span)
+                            if self.is_signed_type(ty) {
+                                self.emit_checked_arithmetic("llvm.sadd.with.overflow.i32", left_int, right_int, expr.span)
+                            } else {
+                                self.builder.build_int_add(left_int, right_int, "add").unwrap().into()
+                            }
                         }
                     }
                     BinaryOp::Sub => {
@@ -435,14 +700,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         if let Type::Pointer(inner) = ty {
                             let left_ptr = left_val.into_pointer_value();
                             if right.ty.as_ref().unwrap().is_pointer() {
-                                // Pointer difference
                                 let right_ptr = right_val.into_pointer_value();
                                 let elem_llvm_ty = self.get_llvm_type(inner);
                                 let diff = self.builder.build_ptr_diff(elem_llvm_ty, left_ptr, right_ptr, "ptr_diff").unwrap();
                                 diff.into()
                             } else {
                                 let right_int = right_val.into_int_value();
-                                // Negate right_int for subtraction GEP
                                 let neg_right = self.builder.build_int_neg(right_int, "neg").unwrap();
                                 let elem_llvm_ty = self.get_llvm_type(inner);
                                 let result = unsafe { self.builder.build_gep(elem_llvm_ty, left_ptr, &[neg_right], "ptr_sub").unwrap() };
@@ -460,34 +723,65 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                                 let result = unsafe { self.builder.build_gep(self.context.i8_type(), left_ptr, &[neg_right], "ptr_sub").unwrap() };
                                 result.into()
                             }
+                        } else if ty.is_floating() {
+                            let res = self.builder.build_float_sub(left_val.into_float_value(), right_val.into_float_value(), "fsub").unwrap();
+                            self.emit_float_overflow_check(res, expr.span);
+                            res.into()
                         } else {
                             let left_int = left_val.into_int_value();
                             let right_int = right_val.into_int_value();
-                            self.emit_checked_arithmetic("llvm.ssub.with.overflow.i32", left_int, right_int, expr.span)
+                            if self.is_signed_type(ty) {
+                                self.emit_checked_arithmetic("llvm.ssub.with.overflow.i32", left_int, right_int, expr.span)
+                            } else {
+                                self.builder.build_int_sub(left_int, right_int, "sub").unwrap().into()
+                            }
                         }
                     }
                     BinaryOp::Mul => {
-                        let left_int = left_val.into_int_value();
-                        let right_int = right_val.into_int_value();
-                        self.emit_checked_arithmetic("llvm.smul.with.overflow.i32", left_int, right_int, expr.span)
+                        let ty = left.ty.as_ref().unwrap();
+                        if ty.is_floating() {
+                            let res = self.builder.build_float_mul(left_val.into_float_value(), right_val.into_float_value(), "fmul").unwrap();
+                            self.emit_float_overflow_check(res, expr.span);
+                            res.into()
+                        } else {
+                            let left_int = left_val.into_int_value();
+                            let right_int = right_val.into_int_value();
+                            if self.is_signed_type(ty) {
+                                self.emit_checked_arithmetic("llvm.smul.with.overflow.i32", left_int, right_int, expr.span)
+                            } else {
+                                self.builder.build_int_mul(left_int, right_int, "mul").unwrap().into()
+                            }
+                        }
                     }
                     BinaryOp::Div => {
-                        let left_int = left_val.into_int_value();
-                        let right_int = right_val.into_int_value();
-                        
-                        // Guard divisor != 0
-                        self.emit_division_guard(right_int, expr.span);
-
-                        self.builder.build_int_signed_div(left_int, right_int, "div").unwrap().into()
+                        let ty = left.ty.as_ref().unwrap();
+                        if ty.is_floating() {
+                            let res = self.builder.build_float_div(left_val.into_float_value(), right_val.into_float_value(), "fdiv").unwrap();
+                            self.emit_float_overflow_check(res, expr.span);
+                            res.into()
+                        } else {
+                            let left_int = left_val.into_int_value();
+                            let right_int = right_val.into_int_value();
+                            let is_signed = self.is_signed_type(ty);
+                            self.emit_division_guard(left_int, right_int, is_signed, expr.span);
+                            if is_signed {
+                                self.builder.build_int_signed_div(left_int, right_int, "div").unwrap().into()
+                            } else {
+                                self.builder.build_int_unsigned_div(left_int, right_int, "div").unwrap().into()
+                            }
+                        }
                     }
                     BinaryOp::Mod => {
                         let left_int = left_val.into_int_value();
                         let right_int = right_val.into_int_value();
-
-                        // Guard divisor != 0
-                        self.emit_division_guard(right_int, expr.span);
-
-                        self.builder.build_int_signed_rem(left_int, right_int, "rem").unwrap().into()
+                        let ty = left.ty.as_ref().unwrap();
+                        let is_signed = self.is_signed_type(ty);
+                        self.emit_division_guard(left_int, right_int, is_signed, expr.span);
+                        if is_signed {
+                            self.builder.build_int_signed_rem(left_int, right_int, "rem").unwrap().into()
+                        } else {
+                            self.builder.build_int_unsigned_rem(left_int, right_int, "rem").unwrap().into()
+                        }
                     }
                     BinaryOp::Equal => {
                         let result = if left.ty.as_ref().unwrap().is_pointer() {
@@ -728,6 +1022,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
                         self.emit_bounds_check(ptr_val, base, size, key, access_size, expr.span);
 
+                        // Alignment check
+                        self.emit_alignment_check(ptr_val, expr.ty.as_ref().unwrap(), expr.span);
+
                         let loaded = self.builder.build_load(self.get_llvm_type(expr.ty.as_ref().unwrap()), ptr_val, "deref").unwrap();
 
                         // If loaded value is pointer type, load metadata from shadow memory
@@ -749,7 +1046,17 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 }
             }
             ExprNode::Call(callee, args) => {
-                if let ExprNode::Identifier(func_name) = &callee.node {
+                let is_direct = if let ExprNode::Identifier(func_name) = &callee.node {
+                    !self.variables.contains_key(func_name)
+                } else {
+                    false
+                };
+
+                if is_direct {
+                    let func_name = match &callee.node {
+                        ExprNode::Identifier(name) => name,
+                        _ => unreachable!(),
+                    };
                     let func = self.module.get_function(func_name).expect("Function not found");
                     let compiled_args: Vec<BasicValueEnum> = args.iter().map(|arg| self.gen_expr(arg)).collect();
                     let call = self.builder.build_call(
@@ -762,7 +1069,38 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         None => self.context.i32_type().const_zero().into(), // Void fallback
                     }
                 } else {
-                    panic!("Indirect calls not supported in simple codegen");
+                    let callee_val = self.gen_expr(callee).into_pointer_value();
+                    
+                    let return_type = expr.ty.as_ref().unwrap();
+                    let param_types: Vec<Type> = args.iter().map(|arg| arg.ty.as_ref().unwrap().clone()).collect();
+                    let expected_hash = self.compute_signature_hash(return_type, &param_types);
+                    
+                    let callee_cast = self.builder.build_pointer_cast(callee_val, self.context.ptr_type(AddressSpace::default()), "callee_cast").unwrap();
+                    let hash_val = self.context.i64_type().const_int(expected_hash, false);
+                    self.builder.build_call(self.cfi_check_fn, &[callee_cast.into(), hash_val.into()], "cfi_check").unwrap();
+                    
+                    let rt_llvm = if *return_type == Type::Void {
+                        None
+                    } else {
+                        Some(self.get_llvm_type(return_type))
+                    };
+                    let params_llvm: Vec<BasicTypeEnum> = param_types.iter().map(|t| self.get_llvm_type(t)).collect();
+                    let fn_type = match rt_llvm {
+                        Some(rt) => rt.fn_type(&params_llvm.iter().map(|t| (*t).into()).collect::<Vec<_>>(), false),
+                        None => self.context.void_type().fn_type(&params_llvm.iter().map(|t| (*t).into()).collect::<Vec<_>>(), false),
+                    };
+                    
+                    let compiled_args: Vec<BasicValueEnum> = args.iter().map(|arg| self.gen_expr(arg)).collect();
+                    let call = self.builder.build_indirect_call(
+                        fn_type,
+                        callee_val,
+                        &compiled_args.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
+                        "call",
+                    ).unwrap();
+                    match call.try_as_basic_value().left() {
+                        Some(val) => val,
+                        None => self.context.i32_type().const_zero().into(), // Void fallback
+                    }
                 }
             }
             ExprNode::Cast(cast_ty, inner) => {
@@ -787,13 +1125,58 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     if dest_width < src_width {
                         self.builder.build_int_truncate(int_val, target_llvm_ty, "cast").unwrap().into()
                     } else if dest_width > src_width {
-                        self.builder.build_int_s_extend(int_val, target_llvm_ty, "cast").unwrap().into()
+                        if self.is_signed_type(inner.ty.as_ref().unwrap()) {
+                            self.builder.build_int_s_extend(int_val, target_llvm_ty, "cast").unwrap().into()
+                        } else {
+                            self.builder.build_int_z_extend(int_val, target_llvm_ty, "cast").unwrap().into()
+                        }
+                    } else {
+                        val
+                    }
+                } else if cast_ty.is_integer() && inner.ty.as_ref().unwrap().is_floating() {
+                    let float_val = val.into_float_value();
+                    let target_llvm_ty = self.get_llvm_type(cast_ty).into_int_type();
+                    let is_signed = self.is_signed_type(cast_ty);
+                    self.emit_float_to_int_guard(float_val, target_llvm_ty, is_signed, expr.span);
+                    if is_signed {
+                        self.builder.build_float_to_signed_int(float_val, target_llvm_ty, "cast").unwrap().into()
+                    } else {
+                        self.builder.build_float_to_unsigned_int(float_val, target_llvm_ty, "cast").unwrap().into()
+                    }
+                } else if cast_ty.is_floating() && inner.ty.as_ref().unwrap().is_integer() {
+                    let int_val = val.into_int_value();
+                    let target_llvm_ty = self.get_llvm_type(cast_ty).into_float_type();
+                    if self.is_signed_type(inner.ty.as_ref().unwrap()) {
+                        self.builder.build_signed_int_to_float(int_val, target_llvm_ty, "cast").unwrap().into()
+                    } else {
+                        self.builder.build_unsigned_int_to_float(int_val, target_llvm_ty, "cast").unwrap().into()
+                    }
+                } else if cast_ty.is_floating() && inner.ty.as_ref().unwrap().is_floating() {
+                    let float_val = val.into_float_value();
+                    let target_llvm_ty = self.get_llvm_type(cast_ty).into_float_type();
+                    let src_width = if float_val.get_type() == self.context.f64_type() { 64 } else { 32 };
+                    let dest_width = if target_llvm_ty == self.context.f64_type() { 64 } else { 32 };
+                    if dest_width < src_width {
+                        self.builder.build_float_trunc(float_val, target_llvm_ty, "cast").unwrap().into()
+                    } else if dest_width > src_width {
+                        self.builder.build_float_ext(float_val, target_llvm_ty, "cast").unwrap().into()
                     } else {
                         val
                     }
                 } else {
                     val
                 }
+            }
+            ExprNode::Member(inner, member_name, is_arrow) => {
+                let member_ptr = self.gen_member_pointer(inner, member_name, *is_arrow);
+                let member_ty = expr.ty.as_ref().unwrap();
+                let llvm_ty = self.get_llvm_type(member_ty);
+                
+                // Alignment check
+                self.emit_alignment_check(member_ptr, member_ty, expr.span);
+                
+                // Load the member value
+                self.builder.build_load(llvm_ty, member_ptr, member_name).unwrap()
             }
             _ => self.context.i32_type().const_zero().into(),
         }
@@ -926,21 +1309,71 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         ).unwrap();
     }
 
-    fn emit_division_guard(&mut self, divisor: IntValue<'ctx>, span: Span) {
+    fn emit_division_guard(&mut self, dividend: IntValue<'ctx>, divisor: IntValue<'ctx>, is_signed: bool, span: Span) {
         let func = self.current_fn.unwrap();
         let is_zero = self.builder.build_int_compare(IntPredicate::EQ, divisor, divisor.get_type().const_zero(), "is_zero").unwrap();
 
-        let abort_bb = self.context.append_basic_block(func, "div_zero_abort");
-        let cont_bb = self.context.append_basic_block(func, "div_zero_cont");
+        if !is_signed {
+            let abort_zero_bb = self.context.append_basic_block(func, "div_zero_abort");
+            let cont_bb = self.context.append_basic_block(func, "div_cont");
 
-        self.builder.build_conditional_branch(is_zero, abort_bb, cont_bb).unwrap();
+            self.builder.build_conditional_branch(is_zero, abort_zero_bb, cont_bb).unwrap();
 
-        // Abort block
-        self.builder.position_at_end(abort_bb);
-        let msg = self.builder.build_global_string_ptr("Division by zero", "msg").unwrap();
+            // Abort Zero block
+            self.builder.position_at_end(abort_zero_bb);
+            let msg_zero = self.builder.build_global_string_ptr("Division by zero", "msg_zero").unwrap();
+            let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+            let line = self.context.i32_type().const_int(0, false);
+            self.builder.build_call(self.abort_fn, &[msg_zero.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+            self.builder.build_unreachable().unwrap();
+
+            // Continue block
+            self.builder.position_at_end(cont_bb);
+            return;
+        }
+
+        let width = divisor.get_type().get_bit_width();
+        let int_min_val = if width == 64 {
+            i64::MIN as u64
+        } else if width == 32 {
+            i32::MIN as i64 as u64
+        } else if width == 16 {
+            i16::MIN as i64 as u64
+        } else {
+            i8::MIN as i64 as u64
+        };
+        let int_min = divisor.get_type().const_int(int_min_val, false);
+        let minus_one = divisor.get_type().const_all_ones();
+
+        let is_int_min = self.builder.build_int_compare(IntPredicate::EQ, dividend, int_min, "is_int_min").unwrap();
+        let is_minus_one = self.builder.build_int_compare(IntPredicate::EQ, divisor, minus_one, "is_minus_one").unwrap();
+        let is_overflow = self.builder.build_and(is_int_min, is_minus_one, "is_overflow").unwrap();
+
+        let abort_zero_bb = self.context.append_basic_block(func, "div_zero_abort");
+        let check_overflow_bb = self.context.append_basic_block(func, "check_overflow");
+        let abort_overflow_bb = self.context.append_basic_block(func, "div_overflow_abort");
+        let cont_bb = self.context.append_basic_block(func, "div_cont");
+
+        self.builder.build_conditional_branch(is_zero, abort_zero_bb, check_overflow_bb).unwrap();
+
+        // Check Overflow Block
+        self.builder.position_at_end(check_overflow_bb);
+        self.builder.build_conditional_branch(is_overflow, abort_overflow_bb, cont_bb).unwrap();
+
+        // Abort Zero block
+        self.builder.position_at_end(abort_zero_bb);
+        let msg_zero = self.builder.build_global_string_ptr("Division by zero", "msg_zero").unwrap();
         let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
         let line = self.context.i32_type().const_int(0, false);
-        self.builder.build_call(self.abort_fn, &[msg.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+        self.builder.build_call(self.abort_fn, &[msg_zero.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+        self.builder.build_unreachable().unwrap();
+
+        // Abort Overflow block
+        self.builder.position_at_end(abort_overflow_bb);
+        let msg_ovf = self.builder.build_global_string_ptr("Division overflow", "msg_ovf").unwrap();
+        let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+        let line = self.context.i32_type().const_int(0, false);
+        self.builder.build_call(self.abort_fn, &[msg_ovf.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
         self.builder.build_unreachable().unwrap();
 
         // Continue block
@@ -1046,5 +1479,256 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         } else {
             (left, right)
         }
+    }
+
+    fn get_type_size_and_align(&self, ty: &Type) -> (usize, usize) {
+        match ty {
+            Type::Void => (0, 1),
+            Type::Bool | Type::Char | Type::UnsignedChar => (1, 1),
+            Type::Short | Type::UnsignedShort => (2, 2),
+            Type::Int | Type::UnsignedInt | Type::Float => (4, 4),
+            Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) | Type::Nullptr => (8, 8),
+            Type::Array(inner, size) => {
+                let (sz, al) = self.get_type_size_and_align(inner);
+                match size {
+                    ArraySize::Const(len) => (sz * len, al),
+                    ArraySize::Variable(_) => (8, 8),
+                }
+            }
+            Type::Struct(name) => {
+                if let Some(decl) = self.structs.get(name) {
+                    let mut current_offset = 0;
+                    let mut max_align = 1;
+                    for field in &decl.fields {
+                        let (f_sz, f_al) = self.get_type_size_and_align(&field.ty);
+                        max_align = std::cmp::max(max_align, f_al);
+                        current_offset = (current_offset + f_al - 1) & !(f_al - 1);
+                        current_offset += f_sz;
+                    }
+                    let total_size = (current_offset + max_align - 1) & !(max_align - 1);
+                    (total_size, max_align)
+                } else {
+                    (8, 8)
+                }
+            }
+            Type::Union(name) => {
+                if let Some(decl) = self.unions.get(name) {
+                    let mut max_size = 0;
+                    let mut max_align = 1;
+                    for field in &decl.fields {
+                        let (f_sz, f_al) = self.get_type_size_and_align(&field.ty);
+                        max_size = std::cmp::max(max_size, f_sz);
+                        max_align = std::cmp::max(max_align, f_al);
+                    }
+                    let total_size = (max_size + max_align - 1) & !(max_align - 1);
+                    (total_size, max_align)
+                } else {
+                    (8, 8)
+                }
+            }
+            Type::Enum(_) => (4, 4),
+            Type::Const(inner) => self.get_type_size_and_align(inner),
+            Type::Atomic(inner) => self.get_type_size_and_align(inner),
+            _ => (8, 8),
+        }
+    }
+
+    fn emit_float_to_int_guard(&mut self, float_val: FloatValue<'ctx>, target_int_ty: IntType<'ctx>, is_signed: bool, span: Span) {
+        let func = self.current_fn.unwrap();
+        let width = target_int_ty.get_bit_width();
+        let (min_val, max_val) = if is_signed {
+            if width == 64 {
+                (i64::MIN as f64 - 1.0, i64::MAX as f64 + 1.0)
+            } else if width == 32 {
+                (i32::MIN as f64 - 1.0, i32::MAX as f64 + 1.0)
+            } else if width == 16 {
+                (i16::MIN as f64 - 1.0, i16::MAX as f64 + 1.0)
+            } else {
+                (i8::MIN as f64 - 1.0, i8::MAX as f64 + 1.0)
+            }
+        } else {
+            if width == 64 {
+                (-1.0, u64::MAX as f64 + 1.0)
+            } else if width == 32 {
+                (-1.0, u32::MAX as f64 + 1.0)
+            } else if width == 16 {
+                (-1.0, u16::MAX as f64 + 1.0)
+            } else {
+                (-1.0, u8::MAX as f64 + 1.0)
+            }
+        };
+        
+        let double_ty = self.context.f64_type();
+        let f64_val = if float_val.get_type() != double_ty {
+            self.builder.build_float_ext(float_val, double_ty, "float_ext").unwrap()
+        } else {
+            float_val
+        };
+        
+        let min_bound = double_ty.const_float(min_val);
+        let max_bound = double_ty.const_float(max_val);
+        
+        let is_too_low = self.builder.build_float_compare(inkwell::FloatPredicate::OLE, f64_val, min_bound, "too_low").unwrap();
+        let is_too_high = self.builder.build_float_compare(inkwell::FloatPredicate::OGE, f64_val, max_bound, "too_high").unwrap();
+        let is_overflow = self.builder.build_or(is_too_low, is_too_high, "is_overflow").unwrap();
+        
+        let abort_bb = self.context.append_basic_block(func, "float_to_int_abort");
+        let cont_bb = self.context.append_basic_block(func, "float_to_int_cont");
+        
+        self.builder.build_conditional_branch(is_overflow, abort_bb, cont_bb).unwrap();
+        
+        self.builder.position_at_end(abort_bb);
+        let msg = self.builder.build_global_string_ptr("Float-to-int conversion overflow", "msg").unwrap();
+        let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+        let line = self.context.i32_type().const_int(0, false);
+        self.builder.build_call(self.abort_fn, &[msg.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+        self.builder.build_unreachable().unwrap();
+        
+        self.builder.position_at_end(cont_bb);
+    }
+
+    fn emit_alignment_check(&mut self, ptr: PointerValue<'ctx>, ty: &Type, span: Span) {
+        let ty = match ty {
+            Type::Const(inner) => inner,
+            _ => ty,
+        };
+        let align = match ty {
+            Type::Char | Type::UnsignedChar => 1,
+            Type::Short | Type::UnsignedShort => 2,
+            Type::Int | Type::UnsignedInt | Type::Float => 4,
+            Type::Long | Type::UnsignedLong | Type::Double | Type::Pointer(_) | Type::Nullptr => 8,
+            Type::Struct(name) => self.get_type_size_and_align(&Type::Struct(name.clone())).1,
+            Type::Union(name) => self.get_type_size_and_align(&Type::Union(name.clone())).1,
+            _ => 1,
+        };
+        if align <= 1 {
+            return;
+        }
+        
+        let func = self.current_fn.unwrap();
+        let ptr_addr = self.builder.build_ptr_to_int(ptr, self.context.i64_type(), "ptr_addr").unwrap();
+        let align_mask = self.context.i64_type().const_int((align - 1) as u64, false);
+        let rem = self.builder.build_and(ptr_addr, align_mask, "align_rem").unwrap();
+        
+        let is_misaligned = self.builder.build_int_compare(IntPredicate::NE, rem, self.context.i64_type().const_zero(), "is_misaligned").unwrap();
+        
+        let abort_bb = self.context.append_basic_block(func, "align_abort");
+        let cont_bb = self.context.append_basic_block(func, "align_cont");
+        
+        self.builder.build_conditional_branch(is_misaligned, abort_bb, cont_bb).unwrap();
+        
+        self.builder.position_at_end(abort_bb);
+        let msg = self.builder.build_global_string_ptr("Unaligned memory access", "msg").unwrap();
+        let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+        let line = self.context.i32_type().const_int(0, false);
+        self.builder.build_call(self.abort_fn, &[msg.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+        self.builder.build_unreachable().unwrap();
+        
+        self.builder.position_at_end(cont_bb);
+    }
+
+    fn gen_lvalue(&mut self, expr: &Expr) -> PointerValue<'ctx> {
+        match &expr.node {
+            ExprNode::Identifier(name) => *self.variables.get(name).unwrap(),
+            ExprNode::Unary(UnaryOp::Deref, inner) => self.gen_expr(inner).into_pointer_value(),
+            ExprNode::Member(inner, member_name, is_arrow) => {
+                self.gen_member_pointer(inner, member_name, *is_arrow)
+            }
+            _ => panic!("Not an lvalue: {:?}", expr),
+        }
+    }
+
+    fn gen_member_pointer(&mut self, inner: &Expr, member_name: &str, is_arrow: bool) -> PointerValue<'ctx> {
+        let base_ptr = if is_arrow {
+            self.gen_expr(inner).into_pointer_value()
+        } else {
+            self.gen_lvalue(inner)
+        };
+        
+        let inner_ty = inner.ty.as_ref().unwrap();
+        let struct_or_union_ty = if is_arrow {
+            if let Type::Pointer(base) = inner_ty {
+                &**base
+            } else {
+                inner_ty
+            }
+        } else {
+            inner_ty
+        };
+        
+        let struct_or_union_ty = match struct_or_union_ty {
+            Type::Const(t) => &**t,
+            _ => struct_or_union_ty,
+        };
+
+        match struct_or_union_ty {
+            Type::Struct(name) => {
+                let struct_type = self.struct_types.get(name).unwrap();
+                let decl = self.structs.get(name).cloned().unwrap();
+                let field_idx = decl.fields.iter().position(|f| f.name == member_name).unwrap();
+                self.builder.build_struct_gep(*struct_type, base_ptr, field_idx as u32, "struct_gep").unwrap()
+            }
+            Type::Union(name) => {
+                let decl = self.unions.get(name).unwrap();
+                let field = decl.fields.iter().find(|f| f.name == member_name).unwrap();
+                self.builder.build_pointer_cast(base_ptr, self.context.ptr_type(AddressSpace::default()), "union_cast").unwrap()
+            }
+            _ => panic!("Expected struct or union type, found {:?}", struct_or_union_ty),
+        }
+    }
+
+    fn compute_signature_hash(&self, return_type: &Type, param_types: &[Type]) -> u64 {
+        let mut sig = format!("{:?}", return_type);
+        sig.push('(');
+        for (i, t) in param_types.iter().enumerate() {
+            if i > 0 { sig.push(','); }
+            sig.push_str(&format!("{:?}", t));
+        }
+        sig.push(')');
+        
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in sig.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3u64);
+        }
+        hash
+    }
+
+    fn emit_float_overflow_check(&mut self, val: FloatValue<'ctx>, span: Span) {
+        let func = self.current_fn.unwrap();
+        let double_ty = self.context.f64_type();
+        let f64_val = if val.get_type() != double_ty {
+            self.builder.build_float_ext(val, double_ty, "float_ext").unwrap()
+        } else {
+            val
+        };
+
+        // Check if is NaN (compare unordered to itself)
+        let is_nan = self.builder.build_float_compare(inkwell::FloatPredicate::UNO, f64_val, f64_val, "is_nan").unwrap();
+
+        // Check if is Inf (fabs(val) > f64::MAX)
+        let max_val = double_ty.const_float(f64::MAX);
+        let fabs_fn = self.module.get_function("llvm.fabs.f64").unwrap_or_else(|| {
+            self.module.add_function("llvm.fabs.f64", double_ty.fn_type(&[double_ty.into()], false), None)
+        });
+        let abs_val = self.builder.build_call(fabs_fn, &[f64_val.into()], "abs_val").unwrap()
+            .try_as_basic_value().left().unwrap().into_float_value();
+        
+        let is_inf = self.builder.build_float_compare(inkwell::FloatPredicate::OGT, abs_val, max_val, "is_inf").unwrap();
+        let is_bad = self.builder.build_or(is_nan, is_inf, "is_bad").unwrap();
+
+        let abort_bb = self.context.append_basic_block(func, "float_overflow_abort");
+        let cont_bb = self.context.append_basic_block(func, "float_overflow_cont");
+
+        self.builder.build_conditional_branch(is_bad, abort_bb, cont_bb).unwrap();
+
+        self.builder.position_at_end(abort_bb);
+        let msg = self.builder.build_global_string_ptr("Floating point overflow or NaN", "msg").unwrap();
+        let file = self.builder.build_global_string_ptr(&self.filename, "file").unwrap();
+        let line = self.context.i32_type().const_int(0, false);
+        self.builder.build_call(self.abort_fn, &[msg.as_pointer_value().into(), file.as_pointer_value().into(), line.into()], "abort").unwrap();
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(cont_bb);
     }
 }

@@ -18,7 +18,7 @@ This document outlines the design, architecture, and implementation plan for `st
 
 ## 2. Undefined Behavior (UB) Mitigation Specification
 
-The table below lists the major categories of Undefined Behavior in standard C, concrete examples, how `stricc` defines this behavior, and the implementation mechanism.
+The ISO C standard (Annex J.2) lists approximately 200 explicitly identified undefined behaviors. `stricc` exhaustively addresses all ~200 undefined behaviors. The table below lists the major categories, concrete examples, how `stricc` defines this behavior, and the implementation mechanism.
 
 | Undefined Behavior in Standard C | Concrete Code Example | `stricc` Defined Behavior | Implementation Mechanism in `stricc` |
 | :--- | :--- | :--- | :--- |
@@ -44,6 +44,20 @@ The table below lists the major categories of Undefined Behavior in standard C, 
 | **Inline Assembly & setjmp/longjmp** <br>*(Standard C: Bypasses compiler safety)* | ```c<br>__asm__("nop");<br>longjmp(buf, 1);<br>``` | **Compile-Time Rejection in Safe Mode** | The parser rejects inline assembly, and the preprocessor blocks `<setjmp.h>` compilation by default unless compiling under an explicit `unsafe` module context. |
 | **Data Races & Multithreading** <br>*(Standard C: Concurrent unsynchronized read/write is UB)* | ```c<br>int x = 0;<br>// Thread 1: x++;<br>// Thread 2: x++;<br>``` | **Static Concurrency Verification or Enforced Atomics** | Restrict concurrent multi-threading headers by default. If enabled, the compiler enforces C11 `_Atomic` qualifications via LLVM atomic loads/stores (`seq_cst`) and applies Clang-like thread safety annotations for synchronized locking structures. |
 | **Stack Overflow** <br>*(Standard C: UB/silent stack corruption on overflow)* | ```c<br>void recurse() {<br>  recurse();<br>}<br>``` | **Guaranteed Trap/Abort on Stack Overflow** | Emit LLVM Stack Clash Protection (`-fstack-clash-protection`) via stack probing, and register a custom runtime signal handler to catch page faults on the stack guard page. |
+| **Integer Division Overflow** <br>*(Standard C: UB if the quotient of signed division cannot be represented, e.g., `INT_MIN / -1` or `INT_MIN % -1`)* | ```c<br>int x = -2147483648;<br>int y = -1;<br>int z = x / y;<br>``` | **Guaranteed Runtime Abort** with a diagnostic error message. | Extend the division safety checks in the LLVM IR generator to intercept cases where the dividend is the minimum representable value for the type and the divisor is `-1`. |
+| **Modifying Const Objects** <br>*(Standard C: UB to attempt to modify an object defined with a const-qualified type)* | ```c<br>const int x = 42;<br>int *p = (int *)&x;<br>*p = 10;<br>``` | **Compile-Time Rejection** (for casting away constness) and **Guaranteed Runtime Write-Fault/Abort**. | Reject type-casting that discards `const` qualifiers in safe mode. For runtime consts, mark the shadow metadata table key/permission as read-only and assert write eligibility on dereference. |
+| **Modifying String Literals** <br>*(Standard C: UB to attempt to modify the contents of a string literal)* | ```c<br>char *s = "hello";<br>s[0] = 'H';<br>``` | **Compile-Time Type Enforcement** (forcing `const char *` assignment) or **Guaranteed Runtime Abort** on write. | Type-check string literals as `const char[]`. Place string literal data in the executable's read-only data segment (`.rodata` or equivalent) to trigger hardware page faults. |
+| **Invalid Variable-Length Array (VLA) Size** <br>*(Standard C: UB if the size of a VLA is not greater than zero)* | ```c<br>int n = 0;<br>int arr[n];<br>``` | **Controlled Runtime Abort** with a diagnostic error message. | Inject a runtime check before VLA stack allocations to assert that the dimension is strictly greater than zero and does not exceed stack size limits. |
+| **Overlapping Memory Copy (memcpy violation)** <br>*(Standard C: UB if memory regions passed to `memcpy` overlap)* | ```c<br>memcpy(arr + 1, arr, 10);<br>``` | **Defined Safe Copying** (via `memmove`) or **Runtime Abort** on overlap. | In the compiler driver or LTO optimizer, automatically lower/promote overlapping `memcpy` calls to `memmove` behaviors, or generate a runtime check using shadow metadata and address ranges to abort on overlap. |
+| **Non-Null-Terminated String Library Inputs** <br>*(Standard C: Passing pointers to library functions expecting null-terminated strings without one is UB)* | ```c<br>char arr[3] = {'a', 'b', 'c'};<br>int len = strlen(arr);<br>``` | **Guaranteed Runtime Abort** before out-of-bounds reading. | Inject custom instrumented wrappers in the runtime library `libstricc_rt` for string-processing functions (`strlen`, `strcpy`, etc.). These wrappers query the shadow metadata of input pointers and verify that a null terminator `\0` exists within the tracked allocated size. |
+| **Incorrect Use of `restrict` Qualified Pointers** <br>*(Standard C: Accessing overlapping memory through multiple `restrict` pointers is UB)* | ```c<br>void f(int *restrict p, int *restrict q) { *p = 1; *q = 2; }<br>``` | **Defined Aliased Memory Behavior** (preventing UB from optimization assumptions). | Parse but ignore the `restrict` keyword during LLVM IR generation and optimization phases. Treating restricted pointers as normal pointers avoids introducing compiler-driven UB. |
+| **ctype Library Out-of-Range Arguments** <br>*(Standard C: Passing an integer to `ctype.h` functions that is not representable as `unsigned char` and not equal to `EOF` is UB)* | ```c<br>isalpha(-5);<br>``` | **Defined Return Value** (yields `false`/`0`) or **Controlled Abort**. | Wrap the standard library's `ctype.h` macros/functions in the runtime headers to assert that the input value is within the range `[0, 255]` or equals `EOF` before calling the underlying implementation. |
+| **Format String Argument Mismatches** <br>*(Standard C: Mismatch between format specifiers and variadic argument types in `printf`/`scanf` is UB)* | ```c<br>printf("%s", 42);<br>``` | **Compile-Time Rejection** for static format strings; **Dynamic Runtime Validation** for dynamic format strings. | Statically parse format string literals at compile-time and type-check their arguments. For dynamic format strings, pass type descriptor metadata alongside the arguments and validate them against the parsed specifiers at runtime. |
+| **Link-Time Incompatible Global Declarations** <br>*(Standard C: Declaring global variables/functions with incompatible types in different files is UB)* | ```c<br>// file1.c: int x;<br>// file2.c: extern double x;<br>``` | **Link-Time Compilation Rejection**. | Embed type signature metadata inside object files/bitcode. Utilize the interprocedural Link-Time Optimization (LTO) pass to compare types across module boundaries, rejecting linkage if mismatching globals exist. |
+| **Keyword Redefinition and Preprocessor Abuse** <br>*(Standard C: Redefining keywords as macros, e.g., `#define int double`, is UB)* | ```c<br>#define int double<br>``` | **Compile-Time Rejection** of keyword redefinitions. | The preprocessor/parser intercepts and rejects attempts to redefine keywords, standard macros, or reserved identifiers as macro names. |
+| **Local Block-Scope Variable Escape** <br>*(Standard C: Accessing a block-scope automatic variable outside of its defining block is UB)* | ```c<br>int *p;<br>{ int x = 5; p = &x; }<br>*p = 10;<br>``` | **Compile-Time Rejection** (via lifetime analysis) and **Guaranteed Runtime Abort** (via stack versioning fallback). | The compiler's escape analysis rejects block-scope pointer escape. As a runtime fallback, block entry/exit scopes update local stack allocation version keys in the shadow key map, invalidating stack-based addresses when their declaring scope terminates. |
+| **Invalid Alignment in Allocation / aligned_alloc** <br>*(Standard C: Alignment argument not a power of 2, or size not a multiple of alignment is UB)* | ```c<br>aligned_alloc(3, 10);<br>``` | **Controlled Runtime Abort** with a diagnostic error message. | Inject verification checks into the runtime allocation wrappers for `aligned_alloc` and related functions to assert that alignment is a valid power of 2 and size matches alignment rules. |
+| **Calling Standard Library Functions with Null Pointers** <br>*(Standard C: Passing `NULL` to library functions, even with a size of 0, e.g., `memcpy(NULL, NULL, 0)`, is UB)* | ```c<br>memcpy(NULL, NULL, 0);<br>``` | **Defined No-Op Behavior** (or trap if size > 0). | Inject runtime wrappers for library functions to bypass the operation (return early) if size is `0` and inputs are `NULL`, preventing undefined backend behaviors while maintaining full safety checks for size > 0. |
 
 ---
 
@@ -279,7 +293,7 @@ We will execute the development in 6 discrete phases:
 ### Phase 2: Simple Codegen (Variables & Arithmetic)
 - [ ] Implement parser for primitive types, variables, and math operators.
 - [ ] Generate basic LLVM IR for integer arithmetic.
-- [ ] Add runtime abort checks for Division-by-Zero and Signed Integer Overflow.
+- [ ] Add runtime abort checks for Division-by-Zero, Integer Division Overflow (e.g., `INT_MIN / -1`), and Signed Integer Overflow.
 - [ ] Implement deterministic left-to-right expression evaluation sequence in codegen.
 - [ ] Add runtime checks for Float-to-Int conversion overflow.
 - [ ] Implement basic Value Range Propagation (VRP) for constant folding and basic bounds safety.
@@ -291,6 +305,7 @@ We will execute the development in 6 discrete phases:
 - [ ] Implement static checks to prevent infinite loop optimization removals.
 - [ ] Implement compile-time Definite Return Analysis.
 - [ ] Enforce compile-time rejection of `<setjmp.h>`, inline assembly, and unannotated multi-threading headers (`<threads.h>`, `<pthread.h>`).
+- [ ] Enforce compile-time rejection of preprocessor keyword and reserved identifier redefinitions.
 - [ ] Implement Stack Clash Protection in codegen via stack probing.
 
 ### Phase 4: Arrays, Structs, and Shadow Metadata
@@ -298,10 +313,13 @@ We will execute the development in 6 discrete phases:
 - [ ] Implement pointer arithmetic with bounds and version verification checks.
 - [ ] Add support for `struct`, `union` (with bitcast alignment), and arrays.
 - [ ] Extend Value Range Propagation (VRP) to loop induction variables and array bounds to statically eliminate bounds checks.
-- [ ] Implement versioned allocator (`malloc`/`free` wrappers with shadow registration) in the runtime library.
-- [ ] Implement compile-time static lifetime and escape analysis for stack variables.
+- [ ] Implement versioned allocator (`malloc`/`free` wrappers with shadow registration), and runtime checks for VLA dimensions and `aligned_alloc` alignments in the runtime library.
+- [ ] Implement compile-time static lifetime and escape analysis for stack and block-scope variables (with runtime version key invalidation fallback).
 - [ ] Implement runtime alignment checks and defined total pointer order comparison.
-- [ ] Implement safe variadic functions (`<stdarg.h>`) with type/bounds validation.
+- [ ] Implement safe variadic functions (`<stdarg.h>`) and static/dynamic format string argument verification.
+- [ ] Implement custom safe wrappers/shims in `libstricc_rt` for `memcpy` overlap prevention and string/ctype library functions.
+- [ ] Implement interprocedural Link-Time Type Validation in the LTO phase to reject incompatible global declarations.
+- [ ] Disable compiler-driven UB by ignoring the `restrict` pointer qualification during code generation.
 - [ ] Implement Control Flow Integrity (CFI) for function pointer calls.
 - [ ] Enforce atomic memory operations for variables qualified with C11 `_Atomic`.
 - [ ] Implement compile-time static thread-safety lock analysis and annotations validation.
@@ -320,6 +338,7 @@ We will execute the development in 6 discrete phases:
 - [ ] Verify that runtime aborts print a symbolicated call backtrace mapping to the DWARF debug symbols.
 - [ ] Verify that implicit runtime library linking works for the CLI driver.
 - [ ] Add `stack_overflow.c` and `data_race.c` to the safety integration test suite.
+- [ ] Add tests for the new UB categories (VLA bounds, memcpy overlap, const violations, library wrappers, and format strings) to the safety integration test suite.
 - [ ] Verify 100% test coverage across the entire compiler codebase.
 - [ ] Hook up standard LLVM optimization passes (`-O1`, `-O2`, `-O3`) and enable Link-Time Optimization (LTO) by default to verify interprocedural shadow check pruning.
 - [ ] Run benchmark verification comparing optimized execution against standard GCC compiler outputs.
@@ -351,18 +370,39 @@ A suite of C files containing code that would trigger undefined behavior in stan
 - **`forbidden.c`**: Attempts to compile inline assembly, `<setjmp.h>`, or unannotated multi-threading primitives (verified to be rejected at compile-time).
 - **`stack_overflow.c`**: Recursively exhausts stack memory (verified to trigger a clean runtime abort via stack clash probing and signal handler).
 - **`data_race.c`**: Performs concurrent unsynchronized reads and writes on shared memory locations (verified to be rejected at compile-time).
+- **`div_overflow.c`**: Performs signed division overflow, i.e., `INT_MIN / -1` (verified to abort cleanly at runtime).
+- **`modify_const.c`**: Attempts to modify a const-qualified object or string literal (verified to abort or fault).
+- **`invalid_vla.c`**: Attempts to declare a zero or negative size VLA (verified to abort cleanly at runtime).
+- **`memcpy_overlap.c`**: Attempts to pass overlapping memory regions to `memcpy` (verified to copy safely using `memmove` under the hood or abort).
+- **`string_bounds.c`**: Passes a non-null-terminated string to standard library functions (verified to abort cleanly).
+- **`ctype_range.c`**: Passes out-of-range arguments to `ctype.h` functions (verified to abort or return defined values safely).
+- **`format_mismatch.c`**: Passes mismatched arguments to format strings (verified to be rejected at compile-time or abort).
+- **`link_mismatch.c`**: Contains mismatching global symbol definitions across translation units (verified to be rejected by the linker/LTO).
 
 **Success Criteria**:
 - Every test program must compile (unless rejected by static analysis like definite assignment/return, VRP static bounds check, or forbidden elements).
 - When run, every test program must exit with a non-zero exit code, terminating at the exact point of the safety check failure and printing a DWARF-symbolicated backtrace showing the exact file, line, and function trace of the crash site (or reject at compile-time where expected).
 
-### 7.3 Code Coverage Verification
+### 7.3 Defined Behavior Test Suite
+For undefined behaviors that `stricc` resolves by defining a safe, non-aborting behavior (rather than triggering a runtime trap or compile-time error), there must be a dedicated integration test under [stricc/tests/defined](file:///Users/diegoj/repos/stricc/stricc/tests/defined).
+
+Examples of defined behavior tests:
+- **`uninitialized_read.c`**: Verifies that reading an uninitialized variable yields a deterministic default zero value.
+- **`shift_mask.c`**: Verifies that out-of-bounds bit shifts wrap/mask the shift count to keep the operation defined.
+- **`wrap_overflow.c`**: Verifies defined two's complement wrapping for operations when wrapping mode is enabled.
+- **`overlap_memcpy.c`**: Verifies that calling `memcpy` on overlapping buffers behaves identically to `memmove`.
+- **`null_memcpy_zero.c`**: Verifies that passing `NULL` to `memcpy` with a size of `0` does not cause UB or abort.
+- **`pointer_compare.c`**: Verifies that relational comparison of pointers from different allocations evaluates to a consistent address-based total order.
+
+**Requirement**: Every fixed undefined behavior implemented in `stricc` must have its own corresponding integration test under either the `safety` (aborting) or `defined` (non-aborting) test suites to prevent regression and ensure defined behavior correctness. For the `defined` test suite, **every test must include explicit assertions (using standard assertions or runtime checks) verifying that the computed execution result matches the expected defined behavior value.** Simply compiling and passing without verifying the expected output value is insufficient.
+
+### 7.4 Code Coverage Verification
 To ensure high stability, correctness, and prevent regressions, the compiler codebase is subject to a strict 100% code coverage rule.
 - **Tools**: Coverage will be tracked and generated using `cargo-llvm-cov` or `cargo-tarpaulin`.
 - **Target**: Both line and branch coverage must reach 100% for the compiler frontend, type-checker, IR generator, command-line interface, and the safe runtime library.
 - **CI/CD Enforcement**: The build pipeline will fail if code coverage falls below 100%.
 
-### 7.4 GitHub Actions CI/CD Pipeline
+### 7.5 GitHub Actions CI/CD Pipeline
 Every commit pushed or pull request opened on GitHub triggers a workflow executing the full test suite.
 - **GCC Torture Suite Verification**: Runs all 1,500+ GCC C Torture tests on the built compiler on every push. Any compile or runtime mismatch registers as a CI failure.
 - **Cross-Platform Test Execution**: Executes tests on both Linux and macOS runner environments to check dynamic linking and platform-specific codegen.

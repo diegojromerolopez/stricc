@@ -33,6 +33,19 @@ impl Driver {
             return Err(format!("Input file '{}' does not exist", self.options.input_file));
         }
 
+        // Check for forbidden constructs
+        let raw_content = fs::read_to_string(input_path)
+            .map_err(|e| format!("Failed to read input file: {}", e))?;
+        if raw_content.contains("#include <setjmp.h>") {
+            return Err("Header <setjmp.h> is forbidden in Safe C mode".to_string());
+        }
+        if raw_content.contains("#include <threads.h>") || raw_content.contains("#include <pthread.h>") {
+            return Err("Multi-threading headers are forbidden in Safe C mode".to_string());
+        }
+        if raw_content.contains("__asm__") || raw_content.contains("asm ") || raw_content.contains("asm(") {
+            return Err("Inline assembly is forbidden in Safe C mode".to_string());
+        }
+
         // 1. Preprocess using host Clang
         let mut preprocessed_temp = tempfile::Builder::new()
             .suffix(".i")
