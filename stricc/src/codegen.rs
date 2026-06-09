@@ -191,6 +191,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
     }
 
+    fn create_entry_block_alloca<T: BasicType<'ctx>>(&self, ty: T, name: &str) -> PointerValue<'ctx> {
+        let current_block = self.builder.get_insert_block().unwrap();
+        let entry_block = self.current_fn.unwrap().get_first_basic_block().unwrap();
+        match entry_block.get_first_instruction() {
+            Some(first_instr) => self.builder.position_before(&first_instr),
+            None => self.builder.position_at_end(entry_block),
+        }
+        let alloca = self.builder.build_alloca(ty, name).unwrap();
+        self.builder.position_at_end(current_block);
+        alloca
+    }
+
     fn get_llvm_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
         match ty {
             Type::Void => panic!("Cannot convert Void type to BasicTypeEnum"),
@@ -446,7 +458,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             // Allocate and store parameter variables
             for (i, param) in f.params.iter().enumerate() {
                 let llvm_param_ty = self.get_llvm_type(&param.ty);
-                let param_alloca = self.builder.build_alloca(llvm_param_ty, &param.name).unwrap();
+                let param_alloca = self.create_entry_block_alloca(llvm_param_ty, &param.name);
                 let val = func.get_nth_param(i as u32).unwrap();
                 self.builder.build_store(param_alloca, val).unwrap();
                 self.variables.insert(param.name.clone(), param_alloca);
@@ -454,9 +466,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
                 if param.ty.is_pointer() {
                     // For parameters, map their metadata to wildcard/infinite by default
-                    let base_alloca = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", param.name)).unwrap();
-                    let size_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_size", param.name)).unwrap();
-                    let key_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_key", param.name)).unwrap();
+                    let base_alloca = self.create_entry_block_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", param.name));
+                    let size_alloca = self.create_entry_block_alloca(self.context.i64_type(), &format!("{}_size", param.name));
+                    let key_alloca = self.create_entry_block_alloca(self.context.i64_type(), &format!("{}_key", param.name));
                     
                     let infinite_size = self.context.i64_type().const_int(u64::MAX, false);
                     let null_base = self.context.ptr_type(AddressSpace::default()).const_null();
@@ -582,7 +594,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     }
                     _ => {
                         let llvm_ty = self.get_llvm_type(ty);
-                        self.builder.build_alloca(llvm_ty, name).unwrap()
+                        self.create_entry_block_alloca(llvm_ty, name)
                     }
                 };
 
@@ -590,7 +602,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.variable_types.insert(name.clone(), ty.clone());
 
                 // Allocate key slot for stack variable
-                let key_alloca_var = self.builder.build_alloca(self.context.i64_type(), &format!("{}_stack_key", name)).unwrap();
+                let key_alloca_var = self.create_entry_block_alloca(self.context.i64_type(), &format!("{}_stack_key", name));
                 let key_val = self.builder.build_call(self.get_next_key_fn, &[], "key_val").unwrap().try_as_basic_value().left().unwrap();
                 self.builder.build_store(key_alloca_var, key_val).unwrap();
                 self.variable_keys.insert(name.clone(), key_alloca_var);
@@ -604,9 +616,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.builder.build_call(self.register_stack_key_fn, &[var_ptr_cast.into(), key_val.into()], "stack_reg").unwrap();
 
                 if ty.is_pointer() || matches!(ty, Type::Array(_, _)) {
-                    let base_alloca = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", name)).unwrap();
-                    let size_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_size", name)).unwrap();
-                    let key_alloca = self.builder.build_alloca(self.context.i64_type(), &format!("{}_key", name)).unwrap();
+                    let base_alloca = self.create_entry_block_alloca(self.context.ptr_type(AddressSpace::default()), &format!("{}_base", name));
+                    let size_alloca = self.create_entry_block_alloca(self.context.i64_type(), &format!("{}_size", name));
+                    let key_alloca = self.create_entry_block_alloca(self.context.i64_type(), &format!("{}_key", name));
                     
                     self.pointer_metadata.insert(name.clone(), (base_alloca, size_alloca, key_alloca));
 
@@ -851,8 +863,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                             }
                         }
                         _ => {
-                            let llvm_ty = self.get_llvm_type(expr.ty.as_ref().unwrap());
-                            self.builder.build_load(llvm_ty, ptr, name).unwrap()
+                            self.build_load_and_sanitize_bool(expr.ty.as_ref().unwrap(), ptr, name)
                         }
                     }
                 } else if let Some(target_fn) = self.module.get_function(name) {
@@ -1271,56 +1282,123 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                             let int_val = right_val.into_int_value();
                             self.builder.build_int_compare(IntPredicate::NE, int_val, int_val.get_type().const_zero(), "not_zero").unwrap()
                         };
-                        
-                        let res_i1 = self.builder.build_or(left_bool, right_bool, "lor").unwrap();
+                            let res_i1 = self.builder.build_or(left_bool, right_bool, "lor").unwrap();
                         self.builder.build_int_z_extend(res_i1, self.context.i32_type(), "lor_cast").unwrap().into()
                     }
                 }
             }
             ExprNode::Unary(op, inner) => {
-                let val = self.gen_expr(inner);
                 match op {
-                    UnaryOp::Neg => self.builder.build_int_neg(val.into_int_value(), "neg").unwrap().into(),
-                    UnaryOp::Not => {
-                        let int_val = if val.is_pointer_value() {
-                            self.builder.build_ptr_to_int(val.into_pointer_value(), self.context.i64_type(), "ptr_to_int").unwrap()
+                    UnaryOp::PreInc | UnaryOp::PostInc | UnaryOp::PreDec | UnaryOp::PostDec => {
+                        let is_inc = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+                        let is_pre = matches!(op, UnaryOp::PreInc | UnaryOp::PreDec);
+                        let ty = inner.ty.as_ref().unwrap();
+                        let lval_ptr = self.gen_lvalue(inner);
+
+                        // Alignment check before load
+                        self.emit_alignment_check(lval_ptr, ty, expr.span);
+
+                        let current_val = self.build_load_and_sanitize_bool(ty, lval_ptr, "incdec_load");
+
+                        // Compute new value
+                        let new_val: BasicValueEnum<'ctx> = if ty.is_pointer() {
+                            let left_ptr = current_val.into_pointer_value();
+                            let delta = self.context.i64_type().const_int(1, false);
+                            let delta = if is_inc { delta } else { self.builder.build_int_neg(delta, "neg").unwrap() };
+                            let result = if let Type::Pointer(elem_ty) = ty {
+                                let elem_llvm_ty = self.get_llvm_type(elem_ty);
+                                unsafe { self.builder.build_gep(elem_llvm_ty, left_ptr, &[delta], "ptr_arith").unwrap() }
+                            } else {
+                                unsafe { self.builder.build_gep(self.context.i8_type(), left_ptr, &[delta], "ptr_arith").unwrap() }
+                            };
+                            result.into()
+                        } else if ty.is_floating() {
+                            let one = self.get_llvm_type(ty).into_float_type().const_float(1.0);
+                            let res = if is_inc {
+                                self.builder.build_float_add(current_val.into_float_value(), one, "fadd").unwrap()
+                            } else {
+                                self.builder.build_float_sub(current_val.into_float_value(), one, "fsub").unwrap()
+                            };
+                            self.emit_float_overflow_check(res, expr.span);
+                            res.into()
                         } else {
-                            val.into_int_value()
+                            let left_int = current_val.into_int_value();
+                            let right_int = left_int.get_type().const_int(1, false);
+                            if self.is_signed_type(ty) {
+                                let intrinsic_op = if is_inc { "sadd" } else { "ssub" };
+                                let intrinsic = self.get_overflow_intrinsic(intrinsic_op, left_int);
+                                self.emit_checked_arithmetic(&intrinsic, left_int, right_int, expr.span)
+                            } else {
+                                let res = if is_inc {
+                                    self.builder.build_int_add(left_int, right_int, "add").unwrap()
+                                } else {
+                                    self.builder.build_int_sub(left_int, right_int, "sub").unwrap()
+                                };
+                                res.into()
+                            }
                         };
-                        let cmp = self.builder.build_int_compare(IntPredicate::EQ, int_val, int_val.get_type().const_zero(), "not").unwrap();
-                        cmp.into()
-                    }
-                    UnaryOp::Deref => {
-                        let ptr_val = val.into_pointer_value();
 
-                        // Shadow bounds check
-                        if !self.is_deref_statically_safe(inner) {
-                            let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(val));
-                            let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
-                            self.emit_bounds_check(ptr_val, base, size, key, access_size, false, expr.span);
+                        // Store new value back
+                        self.builder.build_store(lval_ptr, new_val).unwrap();
+
+                        // Propagate pointer metadata if pointer type
+                        if ty.is_pointer() {
+                            let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(current_val));
+                            self.store_pointer_metadata(inner, base, size, key);
                         }
 
-                        // Alignment check
-                        self.emit_alignment_check(ptr_val, expr.ty.as_ref().unwrap(), expr.span);
-
-                        let loaded = self.builder.build_load(self.get_llvm_type(expr.ty.as_ref().unwrap()), ptr_val, "deref").unwrap();
-
-                        // If loaded value is pointer type, load metadata from shadow memory
-                        if expr.ty.as_ref().unwrap().is_pointer() {
-                            // Loaded pointer will have metadata loaded dynamically by calling __stricc_rt_shadow_load
-                            // For simplicity, we can do this inside get_expr_pointer_metadata or store it locally.
-                        }
-                        loaded
-                    }
-                    UnaryOp::AddrOf => {
-                        if let ExprNode::Identifier(name) = &inner.node {
-                            let ptr = *self.variables.get(name).unwrap();
-                            ptr.into()
+                        if is_pre {
+                            new_val
                         } else {
-                            panic!("AddrOf non-identifier not supported in simple codegen");
+                            current_val
                         }
                     }
-                    _ => val, // Fallback
+                    _ => {
+                        let val = self.gen_expr(inner);
+                        match op {
+                            UnaryOp::Neg => self.builder.build_int_neg(val.into_int_value(), "neg").unwrap().into(),
+                            UnaryOp::Not => {
+                                let int_val = if val.is_pointer_value() {
+                                    self.builder.build_ptr_to_int(val.into_pointer_value(), self.context.i64_type(), "ptr_to_int").unwrap()
+                                } else {
+                                    val.into_int_value()
+                                };
+                                let cmp = self.builder.build_int_compare(IntPredicate::EQ, int_val, int_val.get_type().const_zero(), "not").unwrap();
+                                cmp.into()
+                            }
+                            UnaryOp::Deref => {
+                                let ptr_val = val.into_pointer_value();
+
+                                // Shadow bounds check
+                                if !self.is_deref_statically_safe(inner) {
+                                    let (base, size, key) = self.get_expr_pointer_metadata_with_val(inner, Some(val));
+                                    let access_size = self.get_type_size(expr.ty.as_ref().unwrap());
+                                    self.emit_bounds_check(ptr_val, base, size, key, access_size, false, expr.span);
+                                }
+
+                                // Alignment check
+                                self.emit_alignment_check(ptr_val, expr.ty.as_ref().unwrap(), expr.span);
+
+                                let loaded = self.build_load_and_sanitize_bool(expr.ty.as_ref().unwrap(), ptr_val, "deref");
+
+                                // If loaded value is pointer type, load metadata from shadow memory
+                                if expr.ty.as_ref().unwrap().is_pointer() {
+                                    // Loaded pointer will have metadata loaded dynamically by calling __stricc_rt_shadow_load
+                                    // For simplicity, we can do this inside get_expr_pointer_metadata or store it locally.
+                                }
+                                loaded
+                            }
+                            UnaryOp::AddrOf => {
+                                if let ExprNode::Identifier(name) = &inner.node {
+                                    let ptr = *self.variables.get(name).unwrap();
+                                    ptr.into()
+                                } else {
+                                    panic!("AddrOf non-identifier not supported in simple codegen");
+                                }
+                            }
+                            _ => val, // Fallback
+                        }
+                    }
                 }
             }
             ExprNode::Call(callee, args) => {
@@ -1587,7 +1665,23 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.emit_alignment_check(member_ptr, member_ty, expr.span);
                 
                 // Load the member value
-                self.builder.build_load(llvm_ty, member_ptr, member_name).unwrap()
+                self.build_load_and_sanitize_bool(member_ty, member_ptr, member_name)
+            }
+            ExprNode::SizeofExpr(inner) => {
+                let inner_ty = inner.ty.as_ref().unwrap();
+                self.get_type_size(inner_ty)
+            }
+            ExprNode::SizeofType(target_ty) => {
+                self.get_type_size(target_ty)
+            }
+            ExprNode::AlignofExpr(inner) => {
+                let inner_ty = inner.ty.as_ref().unwrap();
+                let (_, align) = self.get_type_size_and_align(inner_ty);
+                self.context.i64_type().const_int(align as u64, false).into()
+            }
+            ExprNode::AlignofType(target_ty) => {
+                let (_, align) = self.get_type_size_and_align(target_ty);
+                self.context.i64_type().const_int(align as u64, false).into()
             }
             _ => self.context.i32_type().const_zero().into(),
         }
@@ -1599,9 +1693,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn load_shadow_metadata(&mut self, ptr_val: PointerValue<'ctx>) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
-        let base_out = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), "shadow_base").unwrap();
-        let size_out = self.builder.build_alloca(self.context.i64_type(), "shadow_size").unwrap();
-        let key_out = self.builder.build_alloca(self.context.i64_type(), "shadow_key").unwrap();
+        let base_out = self.create_entry_block_alloca(self.context.ptr_type(AddressSpace::default()), "shadow_base");
+        let size_out = self.create_entry_block_alloca(self.context.i64_type(), "shadow_size");
+        let key_out = self.create_entry_block_alloca(self.context.i64_type(), "shadow_key");
 
         let ptr_addr_cast = self.builder.build_pointer_cast(ptr_val, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
         self.builder.build_call(
@@ -1699,6 +1793,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             ExprNode::Call(_, _) => {
                 let ptr_val = val.unwrap_or_else(|| self.gen_expr(expr)).into_pointer_value();
                 self.load_shadow_metadata(ptr_val)
+            }
+            ExprNode::Member(inner, member_name, is_arrow) => {
+                let member_ptr = self.gen_member_pointer(inner, member_name, *is_arrow);
+                self.load_shadow_metadata(member_ptr)
             }
             _ => {
                 // Wildcard fallback
@@ -2023,6 +2121,72 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.build_unreachable().unwrap();
         
         self.builder.position_at_end(cont_bb);
+    }
+
+    fn build_load_and_sanitize_bool(&self, ty: &Type, ptr: PointerValue<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
+        let llvm_ty = self.get_llvm_type(ty);
+        if ty.is_bool() {
+            let i8_ptr = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), &format!("{}_i8_ptr", name)).unwrap();
+            let i8_val = self.builder.build_load(self.context.i8_type(), i8_ptr, &format!("{}_i8_val", name)).unwrap().into_int_value();
+            let cmp = self.builder.build_int_compare(IntPredicate::NE, i8_val, self.context.i8_type().const_zero(), &format!("{}_sanitize", name)).unwrap();
+            cmp.into()
+        } else {
+            self.builder.build_load(llvm_ty, ptr, name).unwrap()
+        }
+    }
+
+    fn get_overflow_intrinsic(&self, op_name: &str, int_val: IntValue<'ctx>) -> String {
+        let bit_width = int_val.get_type().get_bit_width();
+        format!("llvm.{}.with.overflow.i{}", op_name, bit_width)
+    }
+
+    fn store_pointer_metadata(
+        &mut self,
+        lval: &Expr,
+        base_val: BasicValueEnum<'ctx>,
+        size_val: BasicValueEnum<'ctx>,
+        key_val: BasicValueEnum<'ctx>,
+    ) {
+        match &lval.node {
+            ExprNode::Identifier(name) => {
+                if let Some((base_alloca, size_alloca, key_alloca)) = self.pointer_metadata.get(name) {
+                    self.builder.build_store(*base_alloca, base_val).unwrap();
+                    self.builder.build_store(*size_alloca, size_val).unwrap();
+                    self.builder.build_store(*key_alloca, key_val).unwrap();
+                }
+            }
+            ExprNode::Unary(UnaryOp::Deref, inner) => {
+                let dest_ptr = self.gen_expr(inner).into_pointer_value();
+                let ptr_addr_cast = self.builder.build_pointer_cast(dest_ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                let base_cast = self.builder.build_pointer_cast(base_val.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "base_cast").unwrap();
+                self.builder.build_call(
+                    self.shadow_store_fn,
+                    &[
+                        ptr_addr_cast.into(),
+                        base_cast.into(),
+                        size_val.into(),
+                        key_val.into(),
+                    ],
+                    "shadow_store",
+                ).unwrap();
+            }
+            ExprNode::Member(inner, member_name, is_arrow) => {
+                let member_ptr = self.gen_member_pointer(inner, member_name, *is_arrow);
+                let ptr_addr_cast = self.builder.build_pointer_cast(member_ptr, self.context.ptr_type(AddressSpace::default()), "ptr_cast").unwrap();
+                let base_cast = self.builder.build_pointer_cast(base_val.into_pointer_value(), self.context.ptr_type(AddressSpace::default()), "base_cast").unwrap();
+                self.builder.build_call(
+                    self.shadow_store_fn,
+                    &[
+                        ptr_addr_cast.into(),
+                        base_cast.into(),
+                        size_val.into(),
+                        key_val.into(),
+                    ],
+                    "shadow_store",
+                ).unwrap();
+            }
+            _ => {}
+        }
     }
 
     fn emit_alignment_check(&mut self, ptr: PointerValue<'ctx>, ty: &Type, span: Span) {

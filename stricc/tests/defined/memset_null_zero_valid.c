@@ -1,9 +1,10 @@
 // Test: memset with zero size on null is allowed; non-null normal use works
 // Expected: clean exit
 
-#include <stdlib.h>
+void* malloc(unsigned long size);
+void free(void* ptr);
 
-int main(void) {
+int main() {
     // Normal use: zero a buffer
     char *buf = (char *)malloc(16);
     if (!buf) return 1;

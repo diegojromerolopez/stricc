@@ -87,6 +87,30 @@ unsafe fn write_stderr_ptr(p: usize) {
     write_stderr(&buf[i..]);
 }
 
+unsafe fn safe_memmove(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+    let dest_addr = dest as usize;
+    let src_addr = src as usize;
+    if dest_addr == src_addr || n == 0 {
+        return dest;
+    }
+    let d = dest as *mut u8;
+    let s = src as *const u8;
+    if dest_addr < src_addr {
+        // Copy forward
+        for i in 0..n {
+            let val = std::ptr::read_volatile(s.add(i));
+            std::ptr::write_volatile(d.add(i), val);
+        }
+    } else {
+        // Copy backward
+        for i in (0..n).rev() {
+            let val = std::ptr::read_volatile(s.add(i));
+            std::ptr::write_volatile(d.add(i), val);
+        }
+    }
+    dest
+}
+
 // ============================================================================
 // Pointer Metadata: (base, size, key)
 // ============================================================================
@@ -333,6 +357,17 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
 ) {
     let ptr_val = ptr as usize;
     let base_val = base as usize;
+
+    if ptr.is_null() {
+        write_stderr(b"stricc dynamic check failure: Out-of-bounds pointer access (null pointer dereference)\n");
+        write_stderr(b"-> Location: ");
+        write_stderr_cstr(file);
+        write_stderr(b":");
+        write_stderr_i32(line);
+        write_stderr(b"\n");
+        print_backtrace();
+        libc::abort();
+    }
 
     // Check for wildcard / infinite size fallback (un-instrumented pointer)
     if base.is_null() && size == usize::MAX {
@@ -659,6 +694,11 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         libc::abort();
     };
 
+    let old_size = {
+        let shadow_table = SHADOW_TABLE.lock().unwrap();
+        shadow_table.get(&addr).map(|&(_, size, _)| size).unwrap_or(0)
+    };
+
     {
         let mut key_table = KEY_TABLE.lock().unwrap();
         key_table.remove(&addr);
@@ -683,7 +723,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         let mut key_table = KEY_TABLE.lock().unwrap();
         key_table.insert(addr, old_key);
         SHADOW_TABLE_INITIALIZED.store(true, Ordering::SeqCst);
-        shadow_table.insert(addr, (addr, size, old_key));
+        shadow_table.insert(addr, (addr, old_size, old_key));
     }
 
     new_ptr
@@ -894,7 +934,7 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
         }
     }
 
-    libc::memmove(dest, src, n)
+    safe_memmove(dest, src, n)
 }
 
 #[no_mangle]
@@ -974,7 +1014,7 @@ pub unsafe extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c
         }
     }
 
-    libc::memmove(dest as *mut c_void, src as *const c_void, len + 1);
+    safe_memmove(dest as *mut c_void, src as *const c_void, len + 1);
     dest
 }
 
@@ -1308,7 +1348,7 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
         print_backtrace();
         libc::abort();
     }
-    libc::memmove(dest, src, n)
+    safe_memmove(dest, src, n)
 }
 
 // Runtime check: enum value must be within declared range [min_val, max_val]

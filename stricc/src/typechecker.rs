@@ -48,10 +48,9 @@ pub struct Typechecker {
     unions: HashMap<String, StructDecl>,
     filename: String,
     pub errors: Vec<Diagnostic>,
-    // Stack variable tracking for escape analysis
-    // Maps a local variable to its scope depth
     local_vars: SymbolTable<usize>,
     scope_depth: usize,
+    in_unsafe: bool,
 }
 
 impl Typechecker {
@@ -65,6 +64,7 @@ impl Typechecker {
             errors: Vec::new(),
             local_vars: SymbolTable::new(),
             scope_depth: 0,
+            in_unsafe: false,
         }
     }
 
@@ -371,7 +371,10 @@ impl Typechecker {
                 Ok(())
             }
             StmtNode::Unsafe(body) => {
+                let prev_unsafe = self.in_unsafe;
+                self.in_unsafe = true;
                 self.check_stmt(body, return_ty)?;
+                self.in_unsafe = prev_unsafe;
                 Ok(())
             }
         }
@@ -740,7 +743,7 @@ impl Typechecker {
             ExprNode::Cast(cast_ty, inner) => {
                 let inner_ty = self.check_expr(inner)?;
                 // Casting safety checks
-                if inner_ty.is_integer() && cast_ty.is_pointer() {
+                if inner_ty.is_integer() && cast_ty.is_pointer() && !self.in_unsafe {
                     return Err(Diagnostic::error_with_span(
                         "Casting integer to pointer is disallowed in Safe C mode by default",
                         expr.span,
@@ -749,7 +752,7 @@ impl Typechecker {
                     ));
                 }
                 // Casting pointer to integer loses bounds metadata and is disallowed
-                if inner_ty.is_pointer() && cast_ty.is_integer() {
+                if inner_ty.is_pointer() && cast_ty.is_integer() && !self.in_unsafe {
                     return Err(Diagnostic::error_with_span(
                         "Casting pointer to integer is disallowed in Safe C mode (use uintptr_t via unsafe block if strictly necessary)",
                         expr.span,

@@ -34,6 +34,15 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn is_bool(&self) -> bool {
+        match self {
+            Type::Const(inner) => inner.is_bool(),
+            Type::Atomic(inner) => inner.is_bool(),
+            Type::Bool => true,
+            _ => false,
+        }
+    }
+
     pub fn is_integer(&self) -> bool {
         match self {
             Type::Const(inner) => inner.is_integer(),

@@ -8,7 +8,10 @@ int main() {
     }
 
     // Verify alignment
-    unsigned long addr = (unsigned long)ptr;
+    unsigned long addr;
+    __unsafe {
+        addr = (unsigned long)ptr;
+    }
     if ((addr & (unsigned long)63) != 0) {
         return 2;
     }

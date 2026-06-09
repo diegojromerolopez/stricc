@@ -1,10 +1,11 @@
 // Test: realloc properly updates shadow metadata
 // Expected: clean exit (bounds tracking works on reallocated pointer)
 
-#include <stdio.h>
-#include <stdlib.h>
+void* malloc(unsigned long size);
+void* realloc(void* ptr, unsigned long size);
+void free(void* ptr);
 
-int main(void) {
+int main() {
     int *buf = (int *)malloc(4 * sizeof(int));
     if (!buf) return 1;
 
@@ -27,7 +28,7 @@ int main(void) {
 
     int sum = 0;
     for (int i = 0; i < 8; i++) {
-        sum += bigger[i];
+        sum = sum + bigger[i];
     }
     // 10+20+30+40+50+60+70+80 = 360
     free(bigger);

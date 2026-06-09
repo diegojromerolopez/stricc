@@ -1,9 +1,7 @@
 // Test: signed right shift is defined (arithmetic shift on this platform)
 // Expected: clean exit
 
-#include <stdio.h>
-
-int main(void) {
+int main() {
     int x = -8;
     // Arithmetic right shift: -8 >> 1 should be -4
     int y = x >> 1;
