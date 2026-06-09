@@ -107,12 +107,14 @@ fn main() {
         };
         let driver = Driver::new(options);
         if let Err(err) = driver.run() {
-            eprintln!("stricc: error: {}", err);
+            eprintln!("stricc: error: {err}");
             std::process::exit(1);
         }
     } else {
         if preprocess_only || emit_llvm || assemble_only {
-            eprintln!("stricc: error: cannot specify -E, -S, or -emit-llvm with multiple input files");
+            eprintln!(
+                "stricc: error: cannot specify -E, -S, or -emit-llvm with multiple input files"
+            );
             std::process::exit(1);
         }
 
@@ -131,7 +133,7 @@ fn main() {
                 };
                 let driver = Driver::new(options);
                 if let Err(err) = driver.run() {
-                    eprintln!("stricc: error compiling '{}': {}", input, err);
+                    eprintln!("stricc: error compiling '{input}': {err}");
                     std::process::exit(1);
                 }
             }
@@ -140,10 +142,7 @@ fn main() {
             let mut temp_files = Vec::new();
 
             for input in &inputs {
-                let temp_obj = tempfile::Builder::new()
-                    .suffix(".o")
-                    .tempfile()
-                    .unwrap();
+                let temp_obj = tempfile::Builder::new().suffix(".o").tempfile().unwrap();
                 let temp_obj_path = temp_obj.path().to_str().unwrap().to_string();
 
                 let options = DriverOptions {
@@ -159,7 +158,7 @@ fn main() {
                 };
                 let driver = Driver::new(options);
                 if let Err(err) = driver.run() {
-                    eprintln!("stricc: error compiling '{}': {}", input, err);
+                    eprintln!("stricc: error compiling '{input}': {err}");
                     std::process::exit(1);
                 }
                 obj_files.push(temp_obj_path);
@@ -168,7 +167,7 @@ fn main() {
 
             let output_name = output_file.unwrap_or_else(|| "a.out".to_string());
             let mut cmd = std::process::Command::new("clang");
-            cmd.arg(format!("-O{}", opt_level));
+            cmd.arg(format!("-O{opt_level}"));
             for obj in &obj_files {
                 cmd.arg(obj);
             }
@@ -191,7 +190,10 @@ fn main() {
             }
             if rt_path.is_none() {
                 let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                    std::path::PathBuf::from(dir).parent().unwrap().to_path_buf()
+                    std::path::PathBuf::from(dir)
+                        .parent()
+                        .unwrap()
+                        .to_path_buf()
                 } else {
                     std::path::PathBuf::from("/Users/diegoj/repos/stricc")
                 };
@@ -206,11 +208,16 @@ fn main() {
                     }
                 }
             }
-            let rt_lib = rt_path.unwrap_or_else(|| "/Users/diegoj/repos/stricc/target/debug/libstricc_rt.a".to_string());
+            let rt_lib = rt_path.unwrap_or_else(|| {
+                "/Users/diegoj/repos/stricc/target/debug/libstricc_rt.a".to_string()
+            });
             cmd.arg(rt_lib);
             cmd.arg("-o").arg(&output_name);
 
-            let status = cmd.status().map_err(|e| format!("Failed to run linker: {}", e)).unwrap();
+            let status = cmd
+                .status()
+                .map_err(|e| format!("Failed to run linker: {e}"))
+                .unwrap();
             if !status.success() {
                 eprintln!("stricc: error: Linking failed");
                 std::process::exit(1);

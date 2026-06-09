@@ -1,21 +1,21 @@
+use crate::codegen::Codegen;
 use crate::parser::Parser;
 use crate::typechecker::Typechecker;
-use crate::codegen::Codegen;
 use inkwell::context::Context;
-use std::process::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub struct DriverOptions {
     pub input_file: String,
     pub output_file: Option<String>,
-    pub compile_only: bool, // -c
-    pub assemble_only: bool, // -S
-    pub emit_llvm: bool, // -emit-llvm
-    pub preprocess_only: bool, // -E
-    pub optimization_level: u32, // -O0, -O1, -O2, -O3
+    pub compile_only: bool,         // -c
+    pub assemble_only: bool,        // -S
+    pub emit_llvm: bool,            // -emit-llvm
+    pub preprocess_only: bool,      // -E
+    pub optimization_level: u32,    // -O0, -O1, -O2, -O3
     pub include_paths: Vec<String>, // -I
-    pub macros: Vec<String>, // -D
+    pub macros: Vec<String>,        // -D
 }
 
 pub struct Driver {
@@ -30,23 +30,33 @@ impl Driver {
     pub fn run(&self) -> Result<(), String> {
         let input_path = Path::new(&self.options.input_file);
         if !input_path.exists() {
-            return Err(format!("Input file '{}' does not exist", self.options.input_file));
+            return Err(format!(
+                "Input file '{}' does not exist",
+                self.options.input_file
+            ));
         }
 
         // Check for forbidden constructs and keyword redefinitions
         let raw_content = fs::read_to_string(input_path)
-            .map_err(|e| format!("Failed to read input file: {}", e))?;
-        
+            .map_err(|e| format!("Failed to read input file: {e}"))?;
+
         check_keyword_redefinitions(&raw_content)?;
 
         if raw_content.contains("#include <setjmp.h>") {
             return Err("Header <setjmp.h> is forbidden in Safe C mode".to_string());
         }
         // Detect bare setjmp/longjmp calls even without the header
-        if is_identifier_present(&raw_content, "setjmp") || is_identifier_present(&raw_content, "longjmp") {
-            return Err("setjmp/longjmp are forbidden in Safe C mode (use structured control flow)".to_string());
+        if is_identifier_present(&raw_content, "setjmp")
+            || is_identifier_present(&raw_content, "longjmp")
+        {
+            return Err(
+                "setjmp/longjmp are forbidden in Safe C mode (use structured control flow)"
+                    .to_string(),
+            );
         }
-        if raw_content.contains("#include <threads.h>") || raw_content.contains("#include <pthread.h>") {
+        if raw_content.contains("#include <threads.h>")
+            || raw_content.contains("#include <pthread.h>")
+        {
             return Err("Multi-threading headers are forbidden in Safe C mode".to_string());
         }
         // Detect inline assembly in all common forms: __asm__, asm(...), asm {, asm\n, asm\t
@@ -62,38 +72,40 @@ impl Driver {
         let preprocessed_temp = tempfile::Builder::new()
             .suffix(".i")
             .tempfile()
-            .map_err(|e| format!("Failed to create temporary file: {}", e))?;
-        
+            .map_err(|e| format!("Failed to create temporary file: {e}"))?;
+
         let preprocessed_path = preprocessed_temp.path().to_str().unwrap().to_string();
 
         let mut cmd = Command::new("clang");
         cmd.arg("-E");
-        
+
         for inc in &self.options.include_paths {
-            cmd.arg(format!("-I{}", inc));
+            cmd.arg(format!("-I{inc}"));
         }
         for mac in &self.options.macros {
-            cmd.arg(format!("-D{}", mac));
+            cmd.arg(format!("-D{mac}"));
         }
-        
+
         cmd.arg(&self.options.input_file);
         cmd.arg("-o").arg(&preprocessed_path);
 
-        let status = cmd.status().map_err(|e| format!("Failed to execute preprocessor: {}", e))?;
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to execute preprocessor: {e}"))?;
         if !status.success() {
             return Err("Preprocessing failed".to_string());
         }
 
         if self.options.preprocess_only {
             let content = fs::read_to_string(&preprocessed_path)
-                .map_err(|e| format!("Failed to read preprocessed file: {}", e))?;
-            println!("{}", content);
+                .map_err(|e| format!("Failed to read preprocessed file: {e}"))?;
+            println!("{content}");
             return Ok(());
         }
 
         // 2. Read preprocessed source code
         let source_code = fs::read_to_string(&preprocessed_path)
-            .map_err(|e| format!("Failed to read preprocessed source file: {}", e))?;
+            .map_err(|e| format!("Failed to read preprocessed source file: {e}"))?;
 
         // 3. Parse tokens
         let mut parser = Parser::new(&source_code, &self.options.input_file);
@@ -129,10 +141,10 @@ impl Driver {
         let ll_temp = tempfile::Builder::new()
             .suffix(".ll")
             .tempfile()
-            .map_err(|e| format!("Failed to create temporary LLVM IR file: {}", e))?;
-        
+            .map_err(|e| format!("Failed to create temporary LLVM IR file: {e}"))?;
+
         let ll_path = ll_temp.path().to_str().unwrap().to_string();
-        fs::write(&ll_path, &ir_str).map_err(|e| format!("Failed to write LLVM IR: {}", e))?;
+        fs::write(&ll_path, &ir_str).map_err(|e| format!("Failed to write LLVM IR: {e}"))?;
 
         let output_name = self.options.output_file.clone().unwrap_or_else(|| {
             if self.options.compile_only {
@@ -140,7 +152,11 @@ impl Driver {
             } else if self.options.assemble_only {
                 input_path.with_extension("s").to_str().unwrap().to_string()
             } else if self.options.emit_llvm {
-                input_path.with_extension("ll").to_str().unwrap().to_string()
+                input_path
+                    .with_extension("ll")
+                    .to_str()
+                    .unwrap()
+                    .to_string()
             } else {
                 "a.out".to_string()
             }
@@ -148,7 +164,7 @@ impl Driver {
 
         if self.options.emit_llvm {
             fs::copy(&ll_path, &output_name)
-                .map_err(|e| format!("Failed to write LLVM IR output: {}", e))?;
+                .map_err(|e| format!("Failed to write LLVM IR output: {e}"))?;
             return Ok(());
         }
 
@@ -160,7 +176,9 @@ impl Driver {
                 .arg(&ll_path)
                 .arg("-o")
                 .arg(&output_name);
-            let status = cmd.status().map_err(|e| format!("Failed to run compiler: {}", e))?;
+            let status = cmd
+                .status()
+                .map_err(|e| format!("Failed to run compiler: {e}"))?;
             if !status.success() {
                 return Err("Assembly generation failed".to_string());
             }
@@ -175,7 +193,9 @@ impl Driver {
                 .arg(&ll_path)
                 .arg("-o")
                 .arg(&output_name);
-            let status = cmd.status().map_err(|e| format!("Failed to run compiler: {}", e))?;
+            let status = cmd
+                .status()
+                .map_err(|e| format!("Failed to run compiler: {e}"))?;
             if !status.success() {
                 return Err("Object code generation failed".to_string());
             }
@@ -238,7 +258,9 @@ impl Driver {
         cmd.arg(rt_lib);
         cmd.arg("-o").arg(&output_name);
 
-        let status = cmd.status().map_err(|e| format!("Failed to run linker: {}", e))?;
+        let status = cmd
+            .status()
+            .map_err(|e| format!("Failed to run linker: {e}"))?;
         if !status.success() {
             return Err("Linking failed".to_string());
         }
@@ -256,7 +278,7 @@ fn strip_comments(content: &str) -> String {
     let mut chars = content.chars().peekable();
     let mut in_line_comment = false;
     let mut in_block_comment = false;
-    
+
     while let Some(c) = chars.next() {
         if in_line_comment {
             if c == '\n' {
@@ -269,16 +291,14 @@ fn strip_comments(content: &str) -> String {
                 in_block_comment = false;
                 result.push(' '); // Replacing block comment with a space
             }
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line_comment = true;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
         } else {
-            if c == '/' && chars.peek() == Some(&'/') {
-                chars.next();
-                in_line_comment = true;
-            } else if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                in_block_comment = true;
-            } else {
-                result.push(c);
-            }
+            result.push(c);
         }
     }
     result
@@ -287,21 +307,52 @@ fn strip_comments(content: &str) -> String {
 fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
     let spliced = strip_line_continuations(content);
     let stripped = strip_comments(&spliced);
-    
+
     const KEYWORDS: &[&str] = &[
-        "int", "char", "float", "double", "short", "long", "unsigned", "signed", "void",
-        "struct", "union", "enum", "const", "auto", "nullptr", "constexpr", "typeof",
-        "bool", "true", "false", "if", "else", "while", "for", "switch", "case", "default",
-        "break", "continue", "return", "sizeof", "alignof", "_Atomic", "__unsafe", "restrict"
+        "int",
+        "char",
+        "float",
+        "double",
+        "short",
+        "long",
+        "unsigned",
+        "signed",
+        "void",
+        "struct",
+        "union",
+        "enum",
+        "const",
+        "auto",
+        "nullptr",
+        "constexpr",
+        "typeof",
+        "bool",
+        "true",
+        "false",
+        "if",
+        "else",
+        "while",
+        "for",
+        "switch",
+        "case",
+        "default",
+        "break",
+        "continue",
+        "return",
+        "sizeof",
+        "alignof",
+        "_Atomic",
+        "__unsafe",
+        "restrict",
     ];
 
     for line in stripped.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') {
+        if let Some(stripped) = trimmed.strip_prefix('#') {
             // Extract the rest of the directive
-            let rest = trimmed[1..].trim();
-            if rest.starts_with("define") {
-                let rest_define = rest["define".len()..].trim();
+            let rest = stripped.trim();
+            if let Some(stripped_define) = rest.strip_prefix("define") {
+                let rest_define = stripped_define.trim();
                 // Extract the identifier name
                 let mut macro_name = String::new();
                 for c in rest_define.chars() {
@@ -313,8 +364,7 @@ fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
                 }
                 if !macro_name.is_empty() && KEYWORDS.contains(&macro_name.as_str()) {
                     return Err(format!(
-                        "Redefining keyword '{}' as a macro is forbidden in Safe C mode",
-                        macro_name
+                        "Redefining keyword '{macro_name}' as a macro is forbidden in Safe C mode"
                     ));
                 }
             }
@@ -339,8 +389,10 @@ fn is_identifier_present(content: &str, word: &str) -> bool {
     let mut i = 0;
     while i + wlen <= clen {
         if &bytes[i..i + wlen] == word_bytes {
-            let before_ok = i == 0 || !(bytes[i - 1] as char).is_alphanumeric() && bytes[i - 1] != b'_';
-            let after_ok = (i + wlen) >= clen || !(bytes[i + wlen] as char).is_alphanumeric() && bytes[i + wlen] != b'_';
+            let before_ok =
+                i == 0 || !(bytes[i - 1] as char).is_alphanumeric() && bytes[i - 1] != b'_';
+            let after_ok = (i + wlen) >= clen
+                || !(bytes[i + wlen] as char).is_alphanumeric() && bytes[i + wlen] != b'_';
             if before_ok && after_ok {
                 return true;
             }

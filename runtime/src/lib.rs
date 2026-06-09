@@ -1,8 +1,13 @@
+#![allow(
+    clippy::missing_safety_doc,
+    clippy::manual_c_str_literals,
+    clippy::missing_transmute_annotations
+)]
+
 use std::collections::HashMap;
-use std::sync::{Mutex, LazyLock, OnceLock};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::os::raw::{c_char, c_void};
-use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 // ============================================================================
 // Raw stderr I/O helpers — avoids Rust's std I/O which isn't initialized
@@ -13,6 +18,7 @@ unsafe fn write_stderr(s: &[u8]) {
     libc::write(2, s.as_ptr() as *const c_void, s.len());
 }
 
+#[allow(dead_code)]
 unsafe fn write_stderr_str(s: &str) {
     write_stderr(s.as_bytes());
 }
@@ -81,7 +87,11 @@ unsafe fn write_stderr_ptr(p: usize) {
     while n > 0 {
         i -= 1;
         let digit = (n & 0xf) as u8;
-        buf[i] = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
+        buf[i] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        };
         n >>= 4;
     }
     write_stderr(&buf[i..]);
@@ -121,7 +131,11 @@ static SIGNAL_HANDLER_ONCE: std::sync::Once = std::sync::Once::new();
 
 static IN_FFI_CALL: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn sigsegv_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ucontext: *mut libc::c_void) {
+extern "C" fn sigsegv_handler(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    _ucontext: *mut libc::c_void,
+) {
     unsafe {
         if IN_FFI_CALL.load(Ordering::SeqCst) {
             write_stderr(b"stricc FFI sandbox violation: Out-of-bounds read/write detected in third-party library call\n");
@@ -165,10 +179,10 @@ pub unsafe extern "C" fn __stricc_rt_ensure_signal_handler() {
 static SHADOW_TABLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // Global Shadow Table: maps address of a pointer variable in memory -> Metadata of that pointer
-static SHADOW_TABLE: LazyLock<Mutex<HashMap<usize, Metadata>>> = LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
+static SHADOW_TABLE: LazyLock<Mutex<HashMap<usize, Metadata>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[allow(dead_code)]
 unsafe fn get_shadow_table() -> std::sync::MutexGuard<'static, HashMap<usize, Metadata>> {
     let g = SHADOW_TABLE.lock().unwrap();
     SHADOW_TABLE_INITIALIZED.store(true, Ordering::SeqCst);
@@ -176,14 +190,11 @@ unsafe fn get_shadow_table() -> std::sync::MutexGuard<'static, HashMap<usize, Me
 }
 
 // Version Key tracking: maps allocation base address -> allocation version key
-static KEY_TABLE: LazyLock<Mutex<HashMap<usize, u64>>> = LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
+static KEY_TABLE: LazyLock<Mutex<HashMap<usize, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Next unique temporal key generator
-static NEXT_KEY: LazyLock<Mutex<u64>> = LazyLock::new(|| {
-    Mutex::new(1)
-});
+static NEXT_KEY: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 
 // Dynamic linking lookup for real system allocator functions to prevent recursion
 extern "C" {
@@ -193,15 +204,22 @@ const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
 
 static REAL_MALLOC: OnceLock<unsafe extern "C" fn(usize) -> *mut c_void> = OnceLock::new();
 static REAL_FREE: OnceLock<unsafe extern "C" fn(*mut c_void)> = OnceLock::new();
-static REAL_REALLOC: OnceLock<unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void> = OnceLock::new();
+static REAL_REALLOC: OnceLock<unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void> =
+    OnceLock::new();
 
 unsafe fn init_real_functions() {
     let malloc_sym = dlsym(RTLD_NEXT, b"malloc\0".as_ptr() as *const c_char);
     let free_sym = dlsym(RTLD_NEXT, b"free\0".as_ptr() as *const c_char);
     let realloc_sym = dlsym(RTLD_NEXT, b"realloc\0".as_ptr() as *const c_char);
-    assert!(!malloc_sym.is_null(), "Failed to find real malloc via dlsym");
+    assert!(
+        !malloc_sym.is_null(),
+        "Failed to find real malloc via dlsym"
+    );
     assert!(!free_sym.is_null(), "Failed to find real free via dlsym");
-    assert!(!realloc_sym.is_null(), "Failed to find real realloc via dlsym");
+    assert!(
+        !realloc_sym.is_null(),
+        "Failed to find real realloc via dlsym"
+    );
     let _ = REAL_MALLOC.set(std::mem::transmute(malloc_sym));
     let _ = REAL_FREE.set(std::mem::transmute(free_sym));
     let _ = REAL_REALLOC.set(std::mem::transmute(realloc_sym));
@@ -239,7 +257,11 @@ unsafe fn set_in_runtime(val: bool) {
             }
         }
     }
-    let ptr = if val { 1 as *mut c_void } else { std::ptr::null_mut() };
+    let ptr = if val {
+        std::ptr::dangling_mut::<c_void>()
+    } else {
+        std::ptr::null_mut()
+    };
     libc::pthread_setspecific(key as libc::pthread_key_t, ptr);
 }
 
@@ -268,23 +290,24 @@ impl Drop for RuntimeGuard {
 }
 
 // Static bootstrap buffer for allocations during dlsym bootstrap
-static mut BOOTSTRAP_BUFFER: [u8; 131072] = [0; 131072]; // 128 KB
+const BOOTSTRAP_BUFFER_SIZE: usize = 131072; // 128 KB
+static mut BOOTSTRAP_BUFFER: [u8; BOOTSTRAP_BUFFER_SIZE] = [0; BOOTSTRAP_BUFFER_SIZE];
 static mut BOOTSTRAP_INDEX: usize = 0;
 
 unsafe fn bootstrap_malloc(size: usize) -> *mut c_void {
     let align = 16;
     let offset = (BOOTSTRAP_INDEX + align - 1) & !(align - 1);
-    if offset + size > BOOTSTRAP_BUFFER.len() {
+    if offset + size > BOOTSTRAP_BUFFER_SIZE {
         return std::ptr::null_mut();
     }
     BOOTSTRAP_INDEX = offset + size;
-    BOOTSTRAP_BUFFER.as_mut_ptr().add(offset) as *mut c_void
+    (std::ptr::addr_of_mut!(BOOTSTRAP_BUFFER) as *mut u8).add(offset) as *mut c_void
 }
 
 unsafe fn is_bootstrap_ptr(ptr: *mut c_void) -> bool {
     let addr = ptr as usize;
-    let buf_start = BOOTSTRAP_BUFFER.as_ptr() as usize;
-    let buf_end = buf_start + BOOTSTRAP_BUFFER.len();
+    let buf_start = std::ptr::addr_of!(BOOTSTRAP_BUFFER) as usize;
+    let buf_end = buf_start + BOOTSTRAP_BUFFER_SIZE;
     addr >= buf_start && addr < buf_end
 }
 
@@ -297,7 +320,7 @@ unsafe fn bootstrap_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     }
     let new_ptr = bootstrap_malloc(size);
     if !new_ptr.is_null() {
-        let buf_start = BOOTSTRAP_BUFFER.as_ptr() as usize;
+        let buf_start = std::ptr::addr_of!(BOOTSTRAP_BUFFER) as usize;
         let ptr_offset = ptr as usize - buf_start;
         let max_old_size = BOOTSTRAP_INDEX - ptr_offset;
         let copy_size = std::cmp::min(max_old_size, size);
@@ -437,7 +460,9 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
                 write_stderr(b"\n");
             }
             None => {
-                write_stderr(b"stricc dynamic check failure: Use-after-free detected (dangling pointer)\n");
+                write_stderr(
+                    b"stricc dynamic check failure: Use-after-free detected (dangling pointer)\n",
+                );
                 write_stderr(b"-> Pointer key: ");
                 write_stderr_u64(clean_key);
                 write_stderr(b" (freed)\n-> Location: ");
@@ -453,11 +478,7 @@ pub unsafe extern "C" fn __stricc_rt_check_bounds(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __stricc_rt_abort(
-    msg: *const c_char,
-    file: *const c_char,
-    line: i32,
-) {
+pub unsafe extern "C" fn __stricc_rt_abort(msg: *const c_char, file: *const c_char, line: i32) {
     write_stderr(b"stricc runtime abort: ");
     if msg.is_null() {
         write_stderr(b"aborted");
@@ -478,7 +499,9 @@ pub unsafe extern "C" fn __stricc_rt_abort(
 }
 
 fn print_backtrace() {
-    unsafe { write_stderr(b"Backtrace:\n"); }
+    unsafe {
+        write_stderr(b"Backtrace:\n");
+    }
     let mut depth = 0u32;
     backtrace::trace(|frame| {
         let ip = frame.ip();
@@ -523,7 +546,6 @@ fn print_backtrace() {
         depth < 32 // limit depth
     });
 }
-
 
 // Wrapper for malloc
 #[no_mangle]
@@ -696,7 +718,10 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 
     let old_size = {
         let shadow_table = SHADOW_TABLE.lock().unwrap();
-        shadow_table.get(&addr).map(|&(_, size, _)| size).unwrap_or(0)
+        shadow_table
+            .get(&addr)
+            .map(|&(_, size, _)| size)
+            .unwrap_or(0)
     };
 
     {
@@ -808,25 +833,18 @@ pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_
 }
 
 // Global CFI Table: function pointer -> signature hash
-static CFI_TABLE: LazyLock<Mutex<HashMap<usize, u64>>> = LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
+static CFI_TABLE: LazyLock<Mutex<HashMap<usize, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[no_mangle]
-pub unsafe extern "C" fn __stricc_rt_cfi_register(
-    func_ptr: *mut c_void,
-    signature_hash: u64,
-) {
+pub unsafe extern "C" fn __stricc_rt_cfi_register(func_ptr: *mut c_void, signature_hash: u64) {
     let _guard = RuntimeGuard::enter();
     let mut table = CFI_TABLE.lock().unwrap();
     table.insert(func_ptr as usize, signature_hash);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __stricc_rt_cfi_check(
-    func_ptr: *mut c_void,
-    expected_hash: u64,
-) {
+pub unsafe extern "C" fn __stricc_rt_cfi_check(func_ptr: *mut c_void, expected_hash: u64) {
     let _guard = RuntimeGuard::enter();
     if func_ptr.is_null() {
         write_stderr(b"stricc dynamic check failure: Indirect call to NULL pointer\n");
@@ -875,13 +893,11 @@ pub unsafe extern "C" fn __stricc_rt_find_metadata(
     let addr = ptr as usize;
     let table = SHADOW_TABLE.lock().unwrap();
     for (_, &(base, size, key)) in table.iter() {
-        if base != 0 && size != usize::MAX && size != 0 {
-            if addr >= base && addr < base + size {
-                *base_out = base as *mut c_void;
-                *size_out = size;
-                *key_out = key;
-                return 1;
-            }
+        if base != 0 && size != usize::MAX && size != 0 && addr >= base && addr < base + size {
+            *base_out = base as *mut c_void;
+            *size_out = size;
+            *key_out = key;
+            return 1;
         }
     }
     *base_out = std::ptr::null_mut();
@@ -914,24 +930,26 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
     let mut dest_size = usize::MAX;
     let mut dest_key = 0;
     __stricc_rt_find_metadata(dest, &mut dest_base, &mut dest_size, &mut dest_key);
-    if !(dest_base.is_null() && dest_size == usize::MAX) {
-        if (dest as usize) < (dest_base as usize) || (dest as usize) + n > (dest_base as usize) + dest_size {
-            write_stderr(b"stricc dynamic check failure: memcpy dest out of bounds\n");
-            print_backtrace();
-            libc::abort();
-        }
+    if !(dest_base.is_null() && dest_size == usize::MAX)
+        && ((dest as usize) < (dest_base as usize)
+            || (dest as usize) + n > (dest_base as usize) + dest_size)
+    {
+        write_stderr(b"stricc dynamic check failure: memcpy dest out of bounds\n");
+        print_backtrace();
+        libc::abort();
     }
 
     let mut src_base = std::ptr::null_mut();
     let mut src_size = usize::MAX;
     let mut src_key = 0;
     __stricc_rt_find_metadata(src, &mut src_base, &mut src_size, &mut src_key);
-    if !(src_base.is_null() && src_size == usize::MAX) {
-        if (src as usize) < (src_base as usize) || (src as usize) + n > (src_base as usize) + src_size {
-            write_stderr(b"stricc dynamic check failure: memcpy src out of bounds\n");
-            print_backtrace();
-            libc::abort();
-        }
+    if !(src_base.is_null() && src_size == usize::MAX)
+        && ((src as usize) < (src_base as usize)
+            || (src as usize) + n > (src_base as usize) + src_size)
+    {
+        write_stderr(b"stricc dynamic check failure: memcpy src out of bounds\n");
+        print_backtrace();
+        libc::abort();
     }
 
     safe_memmove(dest, src, n)
@@ -1005,13 +1023,19 @@ pub unsafe extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c
     let mut dest_base = std::ptr::null_mut();
     let mut dest_size = usize::MAX;
     let mut dest_key = 0;
-    __stricc_rt_find_metadata(dest as *const c_void, &mut dest_base, &mut dest_size, &mut dest_key);
-    if !(dest_base.is_null() && dest_size == usize::MAX) {
-        if (dest as usize) < (dest_base as usize) || (dest as usize) + len + 1 > (dest_base as usize) + dest_size {
-            write_stderr(b"stricc dynamic check failure: strcpy dest out of bounds\n");
-            print_backtrace();
-            libc::abort();
-        }
+    __stricc_rt_find_metadata(
+        dest as *const c_void,
+        &mut dest_base,
+        &mut dest_size,
+        &mut dest_key,
+    );
+    if !(dest_base.is_null() && dest_size == usize::MAX)
+        && ((dest as usize) < (dest_base as usize)
+            || (dest as usize) + len + 1 > (dest_base as usize) + dest_size)
+    {
+        write_stderr(b"stricc dynamic check failure: strcpy dest out of bounds\n");
+        print_backtrace();
+        libc::abort();
     }
 
     safe_memmove(dest as *mut c_void, src as *const c_void, len + 1);
@@ -1047,7 +1071,7 @@ pub unsafe extern "C" fn strcmp(s1: *const c_char, s2: *const c_char) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn isalpha(c: i32) -> i32 {
-    if c < -1 || c > 255 {
+    if !(-1..=255).contains(&c) {
         write_stderr(b"stricc dynamic check failure: ctype.h argument out of range (");
         write_stderr_i32(c);
         write_stderr(b")\n");
@@ -1059,7 +1083,7 @@ pub unsafe extern "C" fn isalpha(c: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn isdigit(c: i32) -> i32 {
-    if c < -1 || c > 255 {
+    if !(-1..=255).contains(&c) {
         write_stderr(b"stricc dynamic check failure: ctype.h argument out of range (");
         write_stderr_i32(c);
         write_stderr(b")\n");
@@ -1071,7 +1095,7 @@ pub unsafe extern "C" fn isdigit(c: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn isspace(c: i32) -> i32 {
-    if c < -1 || c > 255 {
+    if !(-1..=255).contains(&c) {
         write_stderr(b"stricc dynamic check failure: ctype.h argument out of range (");
         write_stderr_i32(c);
         write_stderr(b")\n");
@@ -1083,7 +1107,7 @@ pub unsafe extern "C" fn isspace(c: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn tolower(c: i32) -> i32 {
-    if c < -1 || c > 255 {
+    if !(-1..=255).contains(&c) {
         write_stderr(b"stricc dynamic check failure: ctype.h argument out of range (");
         write_stderr_i32(c);
         write_stderr(b")\n");
@@ -1095,7 +1119,7 @@ pub unsafe extern "C" fn tolower(c: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn toupper(c: i32) -> i32 {
-    if c < -1 || c > 255 {
+    if !(-1..=255).contains(&c) {
         write_stderr(b"stricc dynamic check failure: ctype.h argument out of range (");
         write_stderr_i32(c);
         write_stderr(b")\n");
@@ -1125,7 +1149,9 @@ pub unsafe extern "C" fn __stricc_rt_validate_printf(
     let fmt_str = match std::str::from_utf8(fmt_slice) {
         Ok(s) => s,
         Err(_) => {
-            write_stderr(b"stricc dynamic check failure: Invalid UTF-8 format string passed to printf\n");
+            write_stderr(
+                b"stricc dynamic check failure: Invalid UTF-8 format string passed to printf\n",
+            );
             print_backtrace();
             libc::abort();
         }
@@ -1143,7 +1169,13 @@ pub unsafe extern "C" fn __stricc_rt_validate_printf(
             }
             let mut spec = String::new();
             while let Some(&next_c) = chars.peek() {
-                if next_c.is_alphabetic() || next_c == '*' || next_c == '.' || next_c.is_digit(10) || next_c == '-' || next_c == '+' {
+                if next_c.is_alphabetic()
+                    || next_c == '*'
+                    || next_c == '.'
+                    || next_c.is_ascii_digit()
+                    || next_c == '-'
+                    || next_c == '+'
+                {
                     spec.push(next_c);
                     chars.next();
                     if next_c.is_alphabetic() {
@@ -1173,7 +1205,9 @@ pub unsafe extern "C" fn __stricc_rt_validate_printf(
                     libc::abort();
                 }
                 if type_ids_slice[arg_idx] != 1 {
-                    write_stderr(b"stricc dynamic check failure: Expected integer for '*' specifier\n");
+                    write_stderr(
+                        b"stricc dynamic check failure: Expected integer for '*' specifier\n",
+                    );
                     print_backtrace();
                     libc::abort();
                 }
@@ -1223,7 +1257,7 @@ pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_in(ptr: *mut c_void, size: usiz
     }
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
     let total_data_size = size + CANARY_SIZE;
-    let num_data_pages = (total_data_size + page_size - 1) / page_size;
+    let num_data_pages = total_data_size.div_ceil(page_size);
     let alloc_size = (num_data_pages + 2) * page_size;
 
     let alloc_ptr = libc::mmap(
@@ -1255,7 +1289,11 @@ pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_in(ptr: *mut c_void, size: usiz
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_out(dest_ptr: *mut c_void, sandbox_ptr: *mut c_void, size: usize) {
+pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_out(
+    dest_ptr: *mut c_void,
+    sandbox_ptr: *mut c_void,
+    size: usize,
+) {
     if dest_ptr.is_null() || sandbox_ptr.is_null() || size == 0 {
         return;
     }
@@ -1271,7 +1309,7 @@ pub unsafe extern "C" fn __stricc_rt_ffi_sandbox_out(dest_ptr: *mut c_void, sand
 
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
     let total_data_size = size + CANARY_SIZE;
-    let num_data_pages = (total_data_size + page_size - 1) / page_size;
+    let num_data_pages = total_data_size.div_ceil(page_size);
     let alloc_size = (num_data_pages + 2) * page_size;
     let alloc_ptr = (sandbox_ptr as *mut u8).sub(page_size) as *mut c_void;
 

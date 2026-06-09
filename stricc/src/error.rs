@@ -1,5 +1,5 @@
-use std::ops::Range;
 use ariadne::{Color, Label, Report, ReportKind, Source};
+use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -44,7 +44,12 @@ impl Diagnostic {
         }
     }
 
-    pub fn error_with_span<S1: Into<String>, S2: Into<String>>(message: S1, span: Span, label: S2, filename: &str) -> Self {
+    pub fn error_with_span<S1: Into<String>, S2: Into<String>>(
+        message: S1,
+        span: Span,
+        label: S2,
+        filename: &str,
+    ) -> Self {
         Self {
             severity: ReportKind::Error,
             message: message.into(),
@@ -54,7 +59,12 @@ impl Diagnostic {
         }
     }
 
-    pub fn warning_with_span<S1: Into<String>, S2: Into<String>>(message: S1, span: Span, label: S2, filename: &str) -> Self {
+    pub fn warning_with_span<S1: Into<String>, S2: Into<String>>(
+        message: S1,
+        span: Span,
+        label: S2,
+        filename: &str,
+    ) -> Self {
         Self {
             severity: ReportKind::Warning,
             message: message.into(),
@@ -67,7 +77,7 @@ impl Diagnostic {
     pub fn print(&self, source_code: &str) {
         let source_id = self.filename.clone();
         if let Some(span) = self.span {
-            let mut report = Report::build(self.severity.clone(), source_id.clone(), span.start)
+            let mut report = Report::build(self.severity, source_id.clone(), span.start)
                 .with_message(&self.message);
 
             let label_text = self.label.as_deref().unwrap_or("here");
@@ -86,7 +96,7 @@ impl Diagnostic {
             report
                 .finish()
                 .eprint((source_id, Source::from(source_code)))
-                .unwrap_or_else(|e| eprintln!("Error printing diagnostic: {}", e));
+                .unwrap_or_else(|e| eprintln!("Error printing diagnostic: {e}"));
         } else {
             let prefix = match self.severity {
                 ReportKind::Error => "error",

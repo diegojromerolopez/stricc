@@ -1,6 +1,6 @@
-use std::process::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 struct TestCase {
     name: &'static str,
@@ -42,8 +42,7 @@ fn run_test_case(case: &TestCase) {
 
     // Compile with stricc
     let mut cmd = Command::new(&stricc_bin);
-    cmd.arg("-o")
-        .arg(&output_bin);
+    cmd.arg("-o").arg(&output_bin);
 
     for path in case.file_path.split_whitespace() {
         cmd.arg(workspace_root.join(path));
@@ -61,9 +60,7 @@ fn run_test_case(case: &TestCase) {
         let stderr = String::from_utf8_lossy(&compile_output.stderr);
         assert!(
             stderr.contains(err_msg),
-            "Expected compiler error containing '{}', but got:\n{}",
-            err_msg,
-            stderr
+            "Expected compiler error containing '{err_msg}', but got:\n{stderr}"
         );
     } else {
         // Compilation must succeed
@@ -88,9 +85,7 @@ fn run_test_case(case: &TestCase) {
             let stderr = String::from_utf8_lossy(&run_output.stderr);
             assert!(
                 stderr.contains(abort_msg),
-                "Expected runtime abort containing '{}', but got:\n{}",
-                abort_msg,
-                stderr
+                "Expected runtime abort containing '{abort_msg}', but got:\n{stderr}"
             );
         } else {
             // Must exit cleanly
@@ -484,4 +479,3 @@ fn test_defined_behavior() {
         run_test_case(case);
     }
 }
-

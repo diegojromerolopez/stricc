@@ -9,3 +9,23 @@ ariadne = "0.3"
 tempfile = "3.8"
 libc = "0.2"
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }
+
+[[test]]
+name = "test_error"
+path = "tests/unit/test_error.rs"
+
+[[test]]
+name = "test_lexer"
+path = "tests/unit/test_lexer.rs"
+
+[[test]]
+name = "test_parser"
+path = "tests/unit/test_parser.rs"
+
+[[test]]
+name = "test_typechecker"
+path = "tests/unit/test_typechecker.rs"
+
+[[test]]
+name = "test_codegen"
+path = "tests/unit/test_codegen.rs"

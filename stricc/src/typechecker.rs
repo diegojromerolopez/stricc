@@ -1,9 +1,15 @@
 use crate::ast::*;
-use crate::error::{Span, Diagnostic};
+use crate::error::{Diagnostic, Span};
 use std::collections::{HashMap, HashSet};
 
 pub struct SymbolTable<T> {
     scopes: Vec<HashMap<String, T>>,
+}
+
+impl<T: Clone> Default for SymbolTable<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Clone> SymbolTable<T> {
@@ -80,10 +86,14 @@ impl Typechecker {
                 }
                 GlobalDecl::Function(f) => {
                     if let Some(existing_decl) = self.functions.get(&f.name) {
-                        if existing_decl.return_type != f.return_type 
+                        if existing_decl.return_type != f.return_type
                             || existing_decl.params.len() != f.params.len()
                             || existing_decl.is_variadic != f.is_variadic
-                            || existing_decl.params.iter().zip(f.params.iter()).any(|(p1, p2)| p1.ty != p2.ty)
+                            || existing_decl
+                                .params
+                                .iter()
+                                .zip(f.params.iter())
+                                .any(|(p1, p2)| p1.ty != p2.ty)
                         {
                             self.errors.push(Diagnostic::error_with_span(
                                 format!("Conflicting redeclaration of function '{}'", f.name),
@@ -131,7 +141,9 @@ impl Typechecker {
                 if let Some(existing_ty) = self.variables.lookup(name) {
                     if existing_ty != *ty {
                         return Err(Diagnostic::error_with_span(
-                            format!("Redeclaration of global variable '{}' with conflicting type {:?}", name, ty),
+                            format!(
+                                "Redeclaration of global variable '{name}' with conflicting type {ty:?}"
+                            ),
                             *span,
                             "Conflicting redeclaration".to_string(),
                             &self.filename,
@@ -176,9 +188,12 @@ impl Typechecker {
                     self.check_stmt(body, &f.return_type)?;
 
                     // Definite Return Analysis
-                    if f.return_type != Type::Void && !self.check_definite_return(body) {
+                    if f.return_type != Type::Void && !Self::check_definite_return(body) {
                         return Err(Diagnostic::error_with_span(
-                            format!("Function '{}' does not return a value on all control flow paths", f.name),
+                            format!(
+                                "Function '{}' does not return a value on all control flow paths",
+                                f.name
+                            ),
                             f.span,
                             "Missing return in non-void function".to_string(),
                             &self.filename,
@@ -358,15 +373,13 @@ impl Typechecker {
                             }
                         }
                     }
-                } else {
-                    if *return_ty != Type::Void {
-                        return Err(Diagnostic::error_with_span(
-                            "Return in non-void function must return a value",
-                            stmt.span,
-                            "Missing return value",
-                            &self.filename,
-                        ));
-                    }
+                } else if *return_ty != Type::Void {
+                    return Err(Diagnostic::error_with_span(
+                        "Return in non-void function must return a value",
+                        stmt.span,
+                        "Missing return value",
+                        &self.filename,
+                    ));
                 }
                 Ok(())
             }
@@ -400,7 +413,7 @@ impl Typechecker {
                     Type::Pointer(Box::new(decl.return_type))
                 } else {
                     return Err(Diagnostic::error_with_span(
-                        format!("Use of undeclared identifier '{}'", name),
+                        format!("Use of undeclared identifier '{name}'"),
                         expr.span,
                         "Undeclared identifier",
                         &self.filename,
@@ -481,7 +494,9 @@ impl Typechecker {
                                 };
                                 if *val < 0 || *val >= bit_width {
                                     return Err(Diagnostic::error_with_span(
-                                        format!("Shift count {} is out of bounds for type {:?}", val, left_ty),
+                                        format!(
+                                            "Shift count {val} is out of bounds for type {left_ty:?}"
+                                        ),
                                         right.span,
                                         "Out-of-bounds constant shift",
                                         &self.filename,
@@ -511,7 +526,9 @@ impl Typechecker {
                         }
                     }
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
-                        if (left_ty.is_integer() || left_ty.is_pointer()) && (right_ty.is_integer() || right_ty.is_pointer()) {
+                        if (left_ty.is_integer() || left_ty.is_pointer())
+                            && (right_ty.is_integer() || right_ty.is_pointer())
+                        {
                             Type::Bool
                         } else {
                             return Err(Diagnostic::error_with_span(
@@ -528,13 +545,11 @@ impl Typechecker {
                     | BinaryOp::LessEqual
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => {
-                        if left_ty.is_numeric() && right_ty.is_numeric() {
-                            Type::Bool
-                        } else if left_ty.is_pointer() && right_ty.is_pointer() {
-                            Type::Bool
-                        } else if left_ty.is_pointer() && right_ty == Type::Nullptr {
-                            Type::Bool
-                        } else if left_ty == Type::Nullptr && right_ty.is_pointer() {
+                        if (left_ty.is_numeric() && right_ty.is_numeric())
+                            || (left_ty.is_pointer() && right_ty.is_pointer())
+                            || (left_ty.is_pointer() && right_ty == Type::Nullptr)
+                            || (left_ty == Type::Nullptr && right_ty.is_pointer())
+                        {
                             Type::Bool
                         } else {
                             return Err(Diagnostic::error_with_span(
@@ -660,7 +675,9 @@ impl Typechecker {
                             if decl.is_variadic {
                                 if args.len() < decl.params.len() {
                                     return Err(Diagnostic::error_with_span(
-                                        format!("Too few arguments to variadic function '{}'", func_name),
+                                        format!(
+                                            "Too few arguments to variadic function '{func_name}'"
+                                        ),
                                         expr.span,
                                         "Mismatched argument count".to_string(),
                                         &self.filename,
@@ -668,7 +685,12 @@ impl Typechecker {
                                 }
                             } else if args.len() != decl.params.len() {
                                 return Err(Diagnostic::error_with_span(
-                                    format!("Function '{}' expects {} arguments, got {}", func_name, decl.params.len(), args.len()),
+                                    format!(
+                                        "Function '{}' expects {} arguments, got {}",
+                                        func_name,
+                                        decl.params.len(),
+                                        args.len()
+                                    ),
                                     expr.span,
                                     "Mismatched argument count".to_string(),
                                     &self.filename,
@@ -676,12 +698,22 @@ impl Typechecker {
                             }
 
                             // Verify formats for printf/scanf family
-                            if func_name == "printf" || func_name == "sprintf" || func_name == "printf_s" {
+                            if func_name == "printf"
+                                || func_name == "sprintf"
+                                || func_name == "printf_s"
+                            {
                                 let fmt_arg_idx = if func_name == "sprintf" { 1 } else { 0 };
                                 if args.len() > fmt_arg_idx {
-                                    if let ExprNode::Literal(Literal::String(fmt)) = &args[fmt_arg_idx].node {
+                                    if let ExprNode::Literal(Literal::String(fmt)) =
+                                        &args[fmt_arg_idx].node
+                                    {
                                         let fmt_str = fmt.clone();
-                                        self.validate_format_string(&fmt_str, args, fmt_arg_idx, expr.span)?;
+                                        self.validate_format_string(
+                                            &fmt_str,
+                                            args,
+                                            fmt_arg_idx,
+                                            expr.span,
+                                        )?;
                                     }
                                 }
                             }
@@ -695,7 +727,7 @@ impl Typechecker {
                             decl.return_type.clone()
                         } else {
                             return Err(Diagnostic::error_with_span(
-                                format!("Calling undefined function '{}'", func_name),
+                                format!("Calling undefined function '{func_name}'"),
                                 expr.span,
                                 "Undefined function call".to_string(),
                                 &self.filename,
@@ -760,7 +792,7 @@ impl Typechecker {
                         &self.filename,
                     ));
                 }
-                if self.has_const(&inner_ty) && !self.has_const(cast_ty) {
+                if Self::has_const(&inner_ty) && !Self::has_const(cast_ty) {
                     return Err(Diagnostic::error_with_span(
                         "Casting away constness is disallowed in Safe C mode",
                         expr.span,
@@ -791,7 +823,9 @@ impl Typechecker {
                             field.ty.clone()
                         } else {
                             return Err(Diagnostic::error_with_span(
-                                format!("Struct '{}' has no member named '{}'", struct_name, member_name),
+                                format!(
+                                    "Struct '{struct_name}' has no member named '{member_name}'"
+                                ),
                                 expr.span,
                                 "Unknown struct field".to_string(),
                                 &self.filename,
@@ -799,7 +833,7 @@ impl Typechecker {
                         }
                     } else {
                         return Err(Diagnostic::error_with_span(
-                            format!("Struct '{}' is not defined", struct_name),
+                            format!("Struct '{struct_name}' is not defined"),
                             expr.span,
                             "Undefined struct".to_string(),
                             &self.filename,
@@ -811,7 +845,7 @@ impl Typechecker {
                             field.ty.clone()
                         } else {
                             return Err(Diagnostic::error_with_span(
-                                format!("Union '{}' has no member named '{}'", union_name, member_name),
+                                format!("Union '{union_name}' has no member named '{member_name}'"),
                                 expr.span,
                                 "Unknown union field".to_string(),
                                 &self.filename,
@@ -819,7 +853,7 @@ impl Typechecker {
                         }
                     } else {
                         return Err(Diagnostic::error_with_span(
-                            format!("Union '{}' is not defined", union_name),
+                            format!("Union '{union_name}' is not defined"),
                             expr.span,
                             "Undefined union".to_string(),
                             &self.filename,
@@ -847,19 +881,21 @@ impl Typechecker {
     fn check_static_bounds(&self, expr: &Expr) -> Result<(), Diagnostic> {
         if let ExprNode::Unary(UnaryOp::Deref, inner) = &expr.node {
             if let ExprNode::Binary(BinaryOp::Add, left, right) = &inner.node {
-                let check_array_index = |arr_expr: &Expr, idx_expr: &Expr| -> Result<(), Diagnostic> {
+                let check_array_index = |arr_expr: &Expr,
+                                         idx_expr: &Expr|
+                 -> Result<(), Diagnostic> {
                     if let ExprNode::Identifier(name) = &arr_expr.node {
-                        if let Some(ty) = self.variables.lookup(name) {
-                            if let Type::Array(_, ArraySize::Const(len)) = ty {
-                                if let ExprNode::Literal(Literal::Int(idx_val)) = &idx_expr.node {
-                                    if *idx_val < 0 || *idx_val as usize >= len {
-                                        return Err(Diagnostic::error_with_span(
-                                            format!("Static out-of-bounds array access: index {} is out of bounds for array '{}' of size {}", idx_val, name, len),
-                                            expr.span,
-                                            "Array index out of bounds".to_string(),
-                                            &self.filename,
-                                        ));
-                                    }
+                        if let Some(Type::Array(_, ArraySize::Const(len))) =
+                            self.variables.lookup(name)
+                        {
+                            if let ExprNode::Literal(Literal::Int(idx_val)) = &idx_expr.node {
+                                if *idx_val < 0 || *idx_val as usize >= len {
+                                    return Err(Diagnostic::error_with_span(
+                                        format!("Static out-of-bounds array access: index {idx_val} is out of bounds for array '{name}' of size {len}"),
+                                        expr.span,
+                                        "Array index out of bounds".to_string(),
+                                        &self.filename,
+                                    ));
                                 }
                             }
                         }
@@ -874,12 +910,12 @@ impl Typechecker {
     }
 
     fn is_lvalue(&self, expr: &Expr) -> bool {
-        match &expr.node {
-            ExprNode::Identifier(_) => true,
-            ExprNode::Unary(UnaryOp::Deref, _) => true,
-            ExprNode::Member(_, _, _) => true,
-            _ => false,
-        }
+        matches!(
+            &expr.node,
+            ExprNode::Identifier(_)
+                | ExprNode::Unary(UnaryOp::Deref, _)
+                | ExprNode::Member(_, _, _)
+        )
     }
 
     fn binary_promote(&self, left: &Type, right: &Type) -> Type {
@@ -909,23 +945,11 @@ impl Typechecker {
         }
 
         // Implicit void* conversions
-        if let Type::Pointer(inner_dest) = dest {
-            if *self.unwrap_const(inner_dest) == Type::Void && src.is_pointer() {
-                return Ok(());
-            }
-        }
-        if let Type::Pointer(inner_src) = src {
-            if *self.unwrap_const(inner_src) == Type::Void && dest.is_pointer() {
-                return Ok(());
-            }
-        }
-
-        // Implicit pointer conversions with qualification changes (const addition)
         if let (Type::Pointer(inner_dest), Type::Pointer(inner_src)) = (dest, src) {
-            if self.unwrap_const(inner_dest) == self.unwrap_const(inner_src) {
-                if self.has_const(inner_src) && !self.has_const(inner_dest) {
+            if Self::unwrap_const(inner_dest) == Self::unwrap_const(inner_src) {
+                if Self::has_const(inner_src) && !Self::has_const(inner_dest) {
                     return Err(Diagnostic::error_with_span(
-                        format!("Incompatible pointer conversion: cannot implicitly discard const qualifier in assignment from {:?} to {:?}", src, dest),
+                        format!("Incompatible pointer conversion: cannot implicitly discard const qualifier in assignment from {src:?} to {dest:?}"),
                         span,
                         "Type incompatibility",
                         &self.filename,
@@ -941,7 +965,7 @@ impl Typechecker {
         }
 
         Err(Diagnostic::error_with_span(
-            format!("Incompatible types in assignment: cannot assign {:?} to {:?}", src, dest),
+            format!("Incompatible types in assignment: cannot assign {src:?} to {dest:?}"),
             span,
             "Type incompatibility",
             &self.filename,
@@ -949,48 +973,44 @@ impl Typechecker {
     }
 
     // Definite Return Analysis
-    fn check_definite_return(&self, stmt: &Stmt) -> bool {
+    fn check_definite_return(stmt: &Stmt) -> bool {
         match &stmt.node {
             StmtNode::Return(_) => true,
             StmtNode::Compound(stmts) => {
                 for s in stmts {
-                    if self.check_definite_return(s) {
+                    if Self::check_definite_return(s) {
                         return true;
                     }
                 }
                 false
             }
-            StmtNode::If(_, then_branch, else_branch) => {
-                if let Some(eb) = else_branch {
-                    self.check_definite_return(then_branch) && self.check_definite_return(eb)
-                } else {
-                    false
-                }
+            StmtNode::If(_, then_branch, Some(else_branch)) => {
+                Self::check_definite_return(then_branch) && Self::check_definite_return(else_branch)
             }
-            StmtNode::While(_, body) => self.check_definite_return(body),
-            StmtNode::For(_, _, _, body) => self.check_definite_return(body),
-            StmtNode::Switch(_, body) => self.check_definite_return(body),
-            StmtNode::Case(_, body) => self.check_definite_return(body),
-            StmtNode::Default(body) => self.check_definite_return(body),
-            StmtNode::Unsafe(body) => self.check_definite_return(body),
+            StmtNode::While(_, body) => Self::check_definite_return(body),
+            StmtNode::For(_, _, _, body) => Self::check_definite_return(body),
+            StmtNode::Switch(_, body) => Self::check_definite_return(body),
+            StmtNode::Case(_, body) => Self::check_definite_return(body),
+            StmtNode::Default(body) => Self::check_definite_return(body),
+            StmtNode::Unsafe(body) => Self::check_definite_return(body),
             _ => false,
         }
     }
 
-    fn has_const(&self, ty: &Type) -> bool {
+    fn has_const(ty: &Type) -> bool {
         match ty {
             Type::Const(_) => true,
-            Type::Pointer(inner) => self.has_const(inner),
-            Type::Array(inner, _) => self.has_const(inner),
+            Type::Pointer(inner) => Self::has_const(inner),
+            Type::Array(inner, _) => Self::has_const(inner),
             _ => false,
         }
     }
 
-    fn check_type(&mut self, ty: &mut Type, span: Span) -> Result<(), Diagnostic> {
+    fn check_type(&mut self, ty: &mut Type, _span: Span) -> Result<(), Diagnostic> {
         match ty {
-            Type::Pointer(inner) => self.check_type(inner, span),
+            Type::Pointer(inner) => self.check_type(inner, _span),
             Type::Array(inner, size) => {
-                self.check_type(inner, span)?;
+                self.check_type(inner, _span)?;
                 if let ArraySize::Variable(expr) = size {
                     let expr_ty = self.check_expr(expr)?;
                     if !expr_ty.is_integer() {
@@ -1004,13 +1024,19 @@ impl Typechecker {
                 }
                 Ok(())
             }
-            Type::Const(inner) => self.check_type(inner, span),
-            Type::Atomic(inner) => self.check_type(inner, span),
+            Type::Const(inner) => self.check_type(inner, _span),
+            Type::Atomic(inner) => self.check_type(inner, _span),
             _ => Ok(()),
         }
     }
 
-    fn validate_format_string(&mut self, fmt: &str, args: &mut [Expr], fmt_arg_idx: usize, span: Span) -> Result<(), Diagnostic> {
+    fn validate_format_string(
+        &mut self,
+        fmt: &str,
+        args: &mut [Expr],
+        fmt_arg_idx: usize,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let mut specifiers = Vec::new();
         let mut chars = fmt.chars().peekable();
         while let Some(c) = chars.next() {
@@ -1023,7 +1049,13 @@ impl Typechecker {
                 }
                 let mut spec = String::new();
                 while let Some(&next_c) = chars.peek() {
-                    if next_c.is_alphabetic() || next_c == '*' || next_c == '.' || next_c.is_digit(10) || next_c == '-' || next_c == '+' {
+                    if next_c.is_alphabetic()
+                        || next_c == '*'
+                        || next_c == '.'
+                        || next_c.is_ascii_digit()
+                        || next_c == '-'
+                        || next_c == '+'
+                    {
                         spec.push(next_c);
                         chars.next();
                         if next_c.is_alphabetic() {
@@ -1051,7 +1083,7 @@ impl Typechecker {
                 let arg_ty = self.check_expr(&mut args[arg_idx])?;
                 if !arg_ty.is_integer() {
                     return Err(Diagnostic::error_with_span(
-                        format!("Expected integer for '*' specifier, found {:?}", arg_ty),
+                        format!("Expected integer for '*' specifier, found {arg_ty:?}"),
                         args[arg_idx].span,
                         "Format mismatch".to_string(),
                         &self.filename,
@@ -1062,7 +1094,9 @@ impl Typechecker {
 
             if arg_idx >= args.len() {
                 return Err(Diagnostic::error_with_span(
-                    format!("Mismatched printf arguments: expected more arguments for specifier %{}", spec),
+                    format!(
+                        "Mismatched printf arguments: expected more arguments for specifier %{spec}"
+                    ),
                     span,
                     "Format mismatch".to_string(),
                     &self.filename,
@@ -1075,7 +1109,7 @@ impl Typechecker {
                 'd' | 'i' | 'o' | 'u' | 'x' | 'X' | 'c' => {
                     if !arg_ty.is_integer() {
                         return Err(Diagnostic::error_with_span(
-                            format!("Format specifier %{} expects integer, found {:?}", spec, arg_ty),
+                            format!("Format specifier %{spec} expects integer, found {arg_ty:?}"),
                             args[arg_idx].span,
                             "Format mismatch".to_string(),
                             &self.filename,
@@ -1085,7 +1119,9 @@ impl Typechecker {
                 'f' | 'e' | 'E' | 'g' | 'G' => {
                     if !arg_ty.is_floating() {
                         return Err(Diagnostic::error_with_span(
-                            format!("Format specifier %{} expects floating point, found {:?}", spec, arg_ty),
+                            format!(
+                                "Format specifier %{spec} expects floating point, found {arg_ty:?}"
+                            ),
                             args[arg_idx].span,
                             "Format mismatch".to_string(),
                             &self.filename,
@@ -1095,7 +1131,9 @@ impl Typechecker {
                 's' => {
                     if !arg_ty.is_pointer() {
                         return Err(Diagnostic::error_with_span(
-                            format!("Format specifier %{} expects string pointer, found {:?}", spec, arg_ty),
+                            format!(
+                                "Format specifier %{spec} expects string pointer, found {arg_ty:?}"
+                            ),
                             args[arg_idx].span,
                             "Format mismatch".to_string(),
                             &self.filename,
@@ -1105,7 +1143,7 @@ impl Typechecker {
                 'p' => {
                     if !arg_ty.is_pointer() {
                         return Err(Diagnostic::error_with_span(
-                            format!("Format specifier %{} expects pointer, found {:?}", spec, arg_ty),
+                            format!("Format specifier %{spec} expects pointer, found {arg_ty:?}"),
                             args[arg_idx].span,
                             "Format mismatch".to_string(),
                             &self.filename,
@@ -1129,9 +1167,9 @@ impl Typechecker {
         Ok(())
     }
 
-    fn unwrap_const<'b>(&self, ty: &'b Type) -> &'b Type {
+    fn unwrap_const(ty: &Type) -> &Type {
         match ty {
-            Type::Const(inner) => self.unwrap_const(inner),
+            Type::Const(inner) => Self::unwrap_const(inner),
             _ => ty,
         }
     }
@@ -1152,7 +1190,7 @@ impl Typechecker {
         for w in left_writes {
             if right_writes.contains(w) {
                 return Err(Diagnostic::error_with_span(
-                    format!("Sequence point violation: variable '{}' is modified twice without a sequence point", w),
+                    format!("Sequence point violation: variable '{w}' is modified twice without a sequence point"),
                     span,
                     "Double write to variable".to_string(),
                     &self.filename,
@@ -1160,7 +1198,7 @@ impl Typechecker {
             }
             if right_reads.contains(w) {
                 return Err(Diagnostic::error_with_span(
-                    format!("Sequence point violation: variable '{}' is modified and read without a sequence point", w),
+                    format!("Sequence point violation: variable '{w}' is modified and read without a sequence point"),
                     span,
                     "Read-write conflict on variable".to_string(),
                     &self.filename,
@@ -1170,7 +1208,7 @@ impl Typechecker {
         for w in right_writes {
             if left_reads.contains(w) {
                 return Err(Diagnostic::error_with_span(
-                    format!("Sequence point violation: variable '{}' is modified and read without a sequence point", w),
+                    format!("Sequence point violation: variable '{w}' is modified and read without a sequence point"),
                     span,
                     "Read-write conflict on variable".to_string(),
                     &self.filename,
@@ -1238,7 +1276,7 @@ impl Typechecker {
                     let right_eff = self.get_effects(right)?;
                     if right_eff.writes.contains(name) {
                         return Err(Diagnostic::error_with_span(
-                            format!("Sequence point violation: variable '{}' is modified twice without a sequence point", name),
+                            format!("Sequence point violation: variable '{name}' is modified twice without a sequence point"),
                             expr.span,
                             "Double write to variable".to_string(),
                             &self.filename,

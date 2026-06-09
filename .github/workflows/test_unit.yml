@@ -1,0 +1,73 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18 all
+          sudo apt-get install -y llvm-18-dev libclang-18-dev libpolly-18-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set Environment Variables
+        run: |
+          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+          echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run unit tests — test_error
+        run: cargo test --test test_error --verbose
+        working-directory: stricc
+
+      - name: Run unit tests — test_lexer
+        run: cargo test --test test_lexer --verbose
+        working-directory: stricc
+
+      - name: Run unit tests — test_parser
+        run: cargo test --test test_parser --verbose
+        working-directory: stricc
+
+      - name: Run unit tests — test_typechecker
+        run: cargo test --test test_typechecker --verbose
+        working-directory: stricc
+
+      - name: Run unit tests — test_codegen
+        run: cargo test --test test_codegen --verbose
+        working-directory: stricc
+
+      - name: Measure coverage (all unit tests)
+        run: |
+          cargo llvm-cov \
+            --test test_error \
+            --test test_lexer \
+            --test test_parser \
+            --test test_typechecker \
+            --test test_codegen \
+            --lcov --output-path lcov.info
+        working-directory: stricc
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-coverage
+          path: stricc/lcov.info

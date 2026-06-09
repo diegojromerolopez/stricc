@@ -47,41 +47,41 @@ pub enum TokenKind {
     StringLiteral(String),
 
     // Operators and Punctuators
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
-    Percent,    // %
-    Ampersand,  // &
-    Pipe,       // |
-    Caret,      // ^
-    Tilde,      // ~
-    Exclamation,// !
-    Equal,      // =
-    EqualEqual, // ==
-    BangEqual,  // !=
-    Less,       // <
-    LessEqual,  // <=
-    Greater,    // >
-    GreaterEqual,// >=
-    LessLess,   // <<
-    GreaterGreater,// >>
-    AmpAmp,     // &&
-    PipePipe,   // ||
-    PlusPlus,   // ++
-    MinusMinus, // --
-    Arrow,      // ->
-    Dot,        // .
-    Question,   // ?
-    Colon,      // :
-    Comma,      // ,
-    Semicolon,  // ;
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    LBrace,     // {
-    RBrace,     // }
+    Plus,           // +
+    Minus,          // -
+    Star,           // *
+    Slash,          // /
+    Percent,        // %
+    Ampersand,      // &
+    Pipe,           // |
+    Caret,          // ^
+    Tilde,          // ~
+    Exclamation,    // !
+    Equal,          // =
+    EqualEqual,     // ==
+    BangEqual,      // !=
+    Less,           // <
+    LessEqual,      // <=
+    Greater,        // >
+    GreaterEqual,   // >=
+    LessLess,       // <<
+    GreaterGreater, // >>
+    AmpAmp,         // &&
+    PipePipe,       // ||
+    PlusPlus,       // ++
+    MinusMinus,     // --
+    Arrow,          // ->
+    Dot,            // .
+    Question,       // ?
+    Colon,          // :
+    Comma,          // ,
+    Semicolon,      // ;
+    LParen,         // (
+    RParen,         // )
+    LBracket,       // [
+    RBracket,       // ]
+    LBrace,         // {
+    RBrace,         // }
 
     // Special
     LineMarker { line: usize, filename: String },
@@ -169,7 +169,7 @@ impl<'a> Lexer<'a> {
         if c == '#' && (start == 0 || (start > 0 && self.source.as_bytes()[start - 1] == b'\n')) {
             self.advance(); // consume '#'
             self.skip_whitespace_and_comments();
-            
+
             // Check for optional "line" keyword
             let mut word = String::new();
             while let Some((_, c2)) = self.current_char {
@@ -392,7 +392,7 @@ impl<'a> Lexer<'a> {
                                 '"' => s.push('"'),
                                 '\'' => s.push('\''),
                                 '0' => s.push('\0'),
-                                _ => return Err(format!("Unknown escape sequence \\{}", c3)),
+                                _ => return Err(format!("Unknown escape sequence \\{c3}")),
                             }
                             self.advance();
                         } else {
@@ -419,7 +419,7 @@ impl<'a> Lexer<'a> {
                                 '"' => '"',
                                 '\'' => '\'',
                                 '0' => '\0',
-                                _ => return Err(format!("Unknown escape sequence \\{}", c3)),
+                                _ => return Err(format!("Unknown escape sequence \\{c3}")),
                             };
                             self.advance();
                             esc
@@ -461,27 +461,25 @@ impl<'a> Lexer<'a> {
                         } else {
                             break;
                         }
-                    } else {
-                        if c2.is_ascii_digit() {
-                            num_str.push(c2);
-                            self.advance();
-                        } else if c2 == '.' {
-                            is_float = true;
-                            num_str.push(c2);
-                            self.advance();
-                        } else if c2 == 'e' || c2 == 'E' {
-                            is_float = true;
-                            num_str.push(c2);
-                            self.advance();
-                            if let Some((_, c3)) = self.current_char {
-                                if c3 == '+' || c3 == '-' {
-                                    num_str.push(c3);
-                                    self.advance();
-                                }
+                    } else if c2.is_ascii_digit() {
+                        num_str.push(c2);
+                        self.advance();
+                    } else if c2 == '.' {
+                        is_float = true;
+                        num_str.push(c2);
+                        self.advance();
+                    } else if c2 == 'e' || c2 == 'E' {
+                        is_float = true;
+                        num_str.push(c2);
+                        self.advance();
+                        if let Some((_, c3)) = self.current_char {
+                            if c3 == '+' || c3 == '-' {
+                                num_str.push(c3);
+                                self.advance();
                             }
-                        } else {
-                            break;
                         }
+                    } else {
+                        break;
                     }
                 }
 
@@ -501,8 +499,11 @@ impl<'a> Lexer<'a> {
                     TokenKind::FloatLiteral(val)
                 } else {
                     let val = if is_hex {
-                        i64::from_str_radix(num_str.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                            .map_err(|e| e.to_string())?
+                        i64::from_str_radix(
+                            num_str.trim_start_matches("0x").trim_start_matches("0X"),
+                            16,
+                        )
+                        .map_err(|e| e.to_string())?
                     } else {
                         num_str.parse::<i64>().map_err(|e| e.to_string())?
                     };
@@ -560,7 +561,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             _ => {
-                return Err(format!("Unexpected character: '{}'", c));
+                return Err(format!("Unexpected character: '{c}'"));
             }
         };
 

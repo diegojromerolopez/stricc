@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::error::{Span, Diagnostic};
+use crate::error::Diagnostic;
 use crate::lexer::{Lexer, Token, TokenKind};
 
 pub struct Parser<'a> {
@@ -7,7 +7,7 @@ pub struct Parser<'a> {
     position: usize,
     pub errors: Vec<Diagnostic>,
     filename: String,
-    source_code: &'a str,
+    _marker: std::marker::PhantomData<&'a str>,
 }
 
 impl<'a> Parser<'a> {
@@ -19,23 +19,24 @@ impl<'a> Parser<'a> {
         let mut current_filename = filename.to_string();
         loop {
             match lexer.next_token() {
-                Ok(token) => {
-                    match &token.kind {
-                        TokenKind::LineMarker { line: _, filename: fm } => {
-                            current_filename = fm.clone();
-                        }
-                        TokenKind::EOF => {
-                            tokens.push(token);
-                            break;
-                        }
-                        _ => {
-                            tokens.push(token);
-                        }
+                Ok(token) => match &token.kind {
+                    TokenKind::LineMarker {
+                        line: _,
+                        filename: fm,
+                    } => {
+                        current_filename = fm.clone();
                     }
-                }
+                    TokenKind::EOF => {
+                        tokens.push(token);
+                        break;
+                    }
+                    _ => {
+                        tokens.push(token);
+                    }
+                },
                 Err(err) => {
                     errors.push(Diagnostic::error(
-                        format!("Lexer error: {}", err),
+                        format!("Lexer error: {err}"),
                         &current_filename,
                     ));
                     break;
@@ -48,7 +49,7 @@ impl<'a> Parser<'a> {
             position: 0,
             errors,
             filename: filename.to_string(),
-            source_code: source,
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -88,13 +89,13 @@ impl<'a> Parser<'a> {
             Ok(self.advance().clone())
         } else {
             let token = self.current_token();
-            let err = Diagnostic::error_with_span(
+            let _err = Diagnostic::error_with_span(
                 format!("Expected {:?}, found {:?}", kind, token.kind),
                 token.span,
                 message.to_string(),
                 &self.filename,
             );
-            Err(format!("Parser error: {}", message))
+            Err(format!("Parser error: {message}"))
         }
     }
 
@@ -146,10 +147,13 @@ impl<'a> Parser<'a> {
 
     fn parse_global_decl(&mut self) -> Result<GlobalDecl, String> {
         let start_span = self.current_token().span;
-        
+
         // Check struct definition
         if self.match_token(&TokenKind::Struct) {
-            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected struct name")?;
+            let name_tok = self.consume(
+                &TokenKind::Identifier(String::new()),
+                "Expected struct name",
+            )?;
             let name = match name_tok.kind {
                 TokenKind::Identifier(n) => n,
                 _ => unreachable!(),
@@ -159,16 +163,29 @@ impl<'a> Parser<'a> {
                 let mut fields = Vec::new();
                 while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
                     let field_ty = self.parse_type()?;
-                    let field_name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected field name")?;
+                    let field_name_tok =
+                        self.consume(&TokenKind::Identifier(String::new()), "Expected field name")?;
                     let field_name = match field_name_tok.kind {
                         TokenKind::Identifier(n) => n,
                         _ => unreachable!(),
                     };
-                    self.consume(&TokenKind::Semicolon, "Expected ';' after field declaration")?;
-                    fields.push(Field { name: field_name, ty: field_ty });
+                    self.consume(
+                        &TokenKind::Semicolon,
+                        "Expected ';' after field declaration",
+                    )?;
+                    fields.push(Field {
+                        name: field_name,
+                        ty: field_ty,
+                    });
                 }
-                self.consume(&TokenKind::RBrace, "Expected '}' to close struct definition")?;
-                self.consume(&TokenKind::Semicolon, "Expected ';' after struct declaration")?;
+                self.consume(
+                    &TokenKind::RBrace,
+                    "Expected '}' to close struct definition",
+                )?;
+                self.consume(
+                    &TokenKind::Semicolon,
+                    "Expected ';' after struct declaration",
+                )?;
                 let end_span = self.tokens[self.position - 1].span;
                 return Ok(GlobalDecl::Struct(StructDecl {
                     name,
@@ -183,7 +200,8 @@ impl<'a> Parser<'a> {
 
         // Check union definition
         if self.match_token(&TokenKind::Union) {
-            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected union name")?;
+            let name_tok =
+                self.consume(&TokenKind::Identifier(String::new()), "Expected union name")?;
             let name = match name_tok.kind {
                 TokenKind::Identifier(n) => n,
                 _ => unreachable!(),
@@ -193,16 +211,26 @@ impl<'a> Parser<'a> {
                 let mut fields = Vec::new();
                 while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
                     let field_ty = self.parse_type()?;
-                    let field_name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected field name")?;
+                    let field_name_tok =
+                        self.consume(&TokenKind::Identifier(String::new()), "Expected field name")?;
                     let field_name = match field_name_tok.kind {
                         TokenKind::Identifier(n) => n,
                         _ => unreachable!(),
                     };
-                    self.consume(&TokenKind::Semicolon, "Expected ';' after field declaration")?;
-                    fields.push(Field { name: field_name, ty: field_ty });
+                    self.consume(
+                        &TokenKind::Semicolon,
+                        "Expected ';' after field declaration",
+                    )?;
+                    fields.push(Field {
+                        name: field_name,
+                        ty: field_ty,
+                    });
                 }
                 self.consume(&TokenKind::RBrace, "Expected '}' to close union definition")?;
-                self.consume(&TokenKind::Semicolon, "Expected ';' after union declaration")?;
+                self.consume(
+                    &TokenKind::Semicolon,
+                    "Expected ';' after union declaration",
+                )?;
                 let end_span = self.tokens[self.position - 1].span;
                 return Ok(GlobalDecl::Union(StructDecl {
                     name,
@@ -237,12 +265,18 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     let param_ty = self.parse_type()?;
-                    let param_name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected parameter name")?;
+                    let param_name_tok = self.consume(
+                        &TokenKind::Identifier(String::new()),
+                        "Expected parameter name",
+                    )?;
                     let param_name = match param_name_tok.kind {
                         TokenKind::Identifier(n) => n,
                         _ => unreachable!(),
                     };
-                    params.push(Param { name: param_name, ty: param_ty });
+                    params.push(Param {
+                        name: param_name,
+                        ty: param_ty,
+                    });
                     if !self.match_token(&TokenKind::Comma) {
                         break;
                     }
@@ -282,9 +316,17 @@ impl<'a> Parser<'a> {
             if self.match_token(&TokenKind::Equal) {
                 init = Some(self.parse_expr()?);
             }
-            self.consume(&TokenKind::Semicolon, "Expected ';' after variable declaration")?;
+            self.consume(
+                &TokenKind::Semicolon,
+                "Expected ';' after variable declaration",
+            )?;
             let end_span = self.tokens[self.position - 1].span;
-            Ok(GlobalDecl::GlobalVar(base_ty, name, init, start_span.union(end_span)))
+            Ok(GlobalDecl::GlobalVar(
+                base_ty,
+                name,
+                init,
+                start_span.union(end_span),
+            ))
         }
     }
 
@@ -385,19 +427,24 @@ impl<'a> Parser<'a> {
                 Ok(Type::Int)
             }
         } else if self.match_token(&TokenKind::Struct) {
-            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected struct name")?;
+            let name_tok = self.consume(
+                &TokenKind::Identifier(String::new()),
+                "Expected struct name",
+            )?;
             match name_tok.kind {
                 TokenKind::Identifier(n) => Ok(Type::Struct(n)),
                 _ => unreachable!(),
             }
         } else if self.match_token(&TokenKind::Union) {
-            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected union name")?;
+            let name_tok =
+                self.consume(&TokenKind::Identifier(String::new()), "Expected union name")?;
             match name_tok.kind {
                 TokenKind::Identifier(n) => Ok(Type::Union(n)),
                 _ => unreachable!(),
             }
         } else if self.match_token(&TokenKind::Enum) {
-            let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected enum name")?;
+            let name_tok =
+                self.consume(&TokenKind::Identifier(String::new()), "Expected enum name")?;
             match name_tok.kind {
                 TokenKind::Identifier(n) => Ok(Type::Enum(n)),
                 _ => unreachable!(),
@@ -487,7 +534,7 @@ impl<'a> Parser<'a> {
             })
         } else if self.match_token(&TokenKind::For) {
             self.consume(&TokenKind::LParen, "Expected '(' after for")?;
-            
+
             let mut init = None;
             if !self.match_token(&TokenKind::Semicolon) {
                 init = Some(Box::new(self.parse_stmt()?)); // Handles decl or expr-stmt (which has semicolon)
@@ -504,7 +551,7 @@ impl<'a> Parser<'a> {
                 post = Some(self.parse_expr()?);
             }
             self.consume(&TokenKind::RParen, "Expected ')' after for parameters")?;
-            
+
             let body = self.parse_stmt()?;
             let end_span = self.tokens[self.position - 1].span;
             Ok(Stmt {
@@ -569,7 +616,10 @@ impl<'a> Parser<'a> {
 
             if is_type {
                 let ty = self.parse_type()?;
-                let name_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected variable name")?;
+                let name_tok = self.consume(
+                    &TokenKind::Identifier(String::new()),
+                    "Expected variable name",
+                )?;
                 let name = match name_tok.kind {
                     TokenKind::Identifier(n) => n,
                     _ => unreachable!(),
@@ -578,7 +628,8 @@ impl<'a> Parser<'a> {
                 // Support C-style array declarations: type name[size];
                 let ty = if self.match_token(&TokenKind::LBracket) {
                     let size = if self.check(&TokenKind::IntLiteral(0)) {
-                        let len_tok = self.consume(&TokenKind::IntLiteral(0), "Expected array length")?;
+                        let len_tok =
+                            self.consume(&TokenKind::IntLiteral(0), "Expected array length")?;
                         let len = match len_tok.kind {
                             TokenKind::IntLiteral(v) => v as usize,
                             _ => unreachable!(),
@@ -795,7 +846,10 @@ impl<'a> Parser<'a> {
 
     fn parse_multiplicative(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_unary()?;
-        while self.check(&TokenKind::Star) || self.check(&TokenKind::Slash) || self.check(&TokenKind::Percent) {
+        while self.check(&TokenKind::Star)
+            || self.check(&TokenKind::Slash)
+            || self.check(&TokenKind::Percent)
+        {
             let op = if self.match_token(&TokenKind::Star) {
                 BinaryOp::Mul
             } else if self.match_token(&TokenKind::Slash) {
@@ -942,7 +996,7 @@ impl<'a> Parser<'a> {
                 let idx = self.parse_expr()?;
                 self.consume(&TokenKind::RBracket, "Expected ']'")?;
                 let end_span = self.tokens[self.position - 1].span;
-                
+
                 // Represent array subscript as a dereference of addition
                 let add_expr = Expr {
                     node: ExprNode::Binary(BinaryOp::Add, Box::new(expr), Box::new(idx)),
@@ -974,7 +1028,10 @@ impl<'a> Parser<'a> {
                 };
             } else if self.match_token(&TokenKind::Dot) {
                 // Member access
-                let member_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected member name")?;
+                let member_tok = self.consume(
+                    &TokenKind::Identifier(String::new()),
+                    "Expected member name",
+                )?;
                 let member = match member_tok.kind {
                     TokenKind::Identifier(n) => n,
                     _ => unreachable!(),
@@ -987,7 +1044,10 @@ impl<'a> Parser<'a> {
                 };
             } else if self.match_token(&TokenKind::Arrow) {
                 // Arrow access
-                let member_tok = self.consume(&TokenKind::Identifier(String::new()), "Expected member name")?;
+                let member_tok = self.consume(
+                    &TokenKind::Identifier(String::new()),
+                    "Expected member name",
+                )?;
                 let member = match member_tok.kind {
                     TokenKind::Identifier(n) => n,
                     _ => unreachable!(),
