@@ -6,18 +6,81 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// ─── CompilerError ────────────────────────────────────────────────────────────
+
+/// Structured error type for every failure the compiler pipeline can produce.
+///
+/// Replaces the raw `String` error that `run()` previously returned so that
+/// call sites can pattern-match on the failure reason (DIP / OCP).
+#[derive(Debug)]
+pub enum CompilerError {
+    /// An I/O operation failed.
+    Io(String),
+    /// The source file uses a construct that Safe-C forbids.
+    ForbiddenConstruct(String),
+    /// One or more lexer / parser errors were detected.
+    ParseError,
+    /// One or more type-checking errors were detected.
+    TypeCheckError,
+    /// Code generation produced an error.
+    CodegenError(String),
+    /// The assembler step failed.
+    AssemblyError,
+    /// The linker step failed.
+    LinkError,
+}
+
+impl std::fmt::Display for CompilerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompilerError::Io(msg) => write!(f, "{msg}"),
+            CompilerError::ForbiddenConstruct(msg) => write!(f, "{msg}"),
+            CompilerError::ParseError => write!(f, "Parsing failed due to syntax errors"),
+            CompilerError::TypeCheckError => write!(f, "Typechecking failed"),
+            CompilerError::CodegenError(msg) => write!(f, "Code generation failed: {msg}"),
+            CompilerError::AssemblyError => write!(f, "Assembly generation failed"),
+            CompilerError::LinkError => write!(f, "Linking failed"),
+        }
+    }
+}
+
+impl std::error::Error for CompilerError {}
+
+// ─── CompilerPipeline trait ───────────────────────────────────────────────────
+
+/// Abstraction over the full compile-then-emit flow.
+///
+/// This makes it possible to inject alternative pipelines (e.g. a no-op for
+/// benchmarking, or a pipeline that emits diagnostics to a buffer in tests).
+pub trait CompilerPipeline {
+    /// Execute the pipeline and either produce the requested output or return
+    /// a structured [`CompilerError`].
+    fn run(&self) -> Result<(), CompilerError>;
+}
+
+// ─── DriverOptions ────────────────────────────────────────────────────────────
+
+/// Configuration options passed to the compiler driver.
 pub struct DriverOptions {
     pub input_file: String,
     pub output_file: Option<String>,
     pub compile_only: bool,         // -c
     pub assemble_only: bool,        // -S
-    pub emit_llvm: bool,            // -emit-llvm
+    pub emit_llvm: bool,            // --emit-llvm
     pub preprocess_only: bool,      // -E
-    pub optimization_level: u32,    // -O0, -O1, -O2, -O3
+    pub optimization_level: u32,    // -O0 … -O3
     pub include_paths: Vec<String>, // -I
     pub macros: Vec<String>,        // -D
 }
 
+// ─── Driver ───────────────────────────────────────────────────────────────────
+
+/// The top-level compiler driver.
+///
+/// `Driver` is a thin **orchestrator**: it delegates each pipeline stage to a
+/// focused helper (forbidden-construct check, preprocessor, parser, type-
+/// checker, code generator, output writer, linker).  No stage logic lives
+/// directly in `run()`.
 pub struct Driver {
     options: DriverOptions,
 }
@@ -26,248 +89,373 @@ impl Driver {
     pub fn new(options: DriverOptions) -> Self {
         Self { options }
     }
+}
 
-    pub fn run(&self) -> Result<(), String> {
+impl CompilerPipeline for Driver {
+    fn run(&self) -> Result<(), CompilerError> {
         let input_path = Path::new(&self.options.input_file);
-        if !input_path.exists() {
-            return Err(format!(
-                "Input file '{}' does not exist",
-                self.options.input_file
-            ));
-        }
 
-        // Check for forbidden constructs and keyword redefinitions
-        let raw_content = fs::read_to_string(input_path)
-            .map_err(|e| format!("Failed to read input file: {e}"))?;
+        // ── Stage 0: read raw source ──────────────────────────────────────────
+        let raw_content = read_source_file(input_path, &self.options.input_file)?;
 
-        check_keyword_redefinitions(&raw_content)?;
+        // ── Stage 1: forbidden-construct check ────────────────────────────────
+        ForbiddenConstructChecker::check(&raw_content)?;
 
-        if raw_content.contains("#include <setjmp.h>") {
-            return Err("Header <setjmp.h> is forbidden in Safe C mode".to_string());
-        }
-        // Detect bare setjmp/longjmp calls even without the header
-        if is_identifier_present(&raw_content, "setjmp")
-            || is_identifier_present(&raw_content, "longjmp")
-        {
-            return Err(
-                "setjmp/longjmp are forbidden in Safe C mode (use structured control flow)"
-                    .to_string(),
-            );
-        }
-        if raw_content.contains("#include <threads.h>")
-            || raw_content.contains("#include <pthread.h>")
-        {
-            return Err("Multi-threading headers are forbidden in Safe C mode".to_string());
-        }
-        // Detect inline assembly in all common forms: __asm__, asm(...), asm {, asm\n, asm\t
-        if raw_content.contains("__asm__") || raw_content.contains("asm(") {
-            return Err("Inline assembly is forbidden in Safe C mode".to_string());
-        }
-        // Check for 'asm' as a standalone keyword (not part of an identifier)
-        if is_identifier_present(&raw_content, "asm") {
-            return Err("Inline assembly is forbidden in Safe C mode".to_string());
-        }
-
-        // 1. Preprocess using host Clang
-        let preprocessed_temp = tempfile::Builder::new()
-            .suffix(".i")
-            .tempfile()
-            .map_err(|e| format!("Failed to create temporary file: {e}"))?;
-
-        let preprocessed_path = preprocessed_temp.path().to_str().unwrap().to_string();
-
-        let mut cmd = Command::new("clang");
-        cmd.arg("-E");
-
-        for inc in &self.options.include_paths {
-            cmd.arg(format!("-I{inc}"));
-        }
-        for mac in &self.options.macros {
-            cmd.arg(format!("-D{mac}"));
-        }
-
-        cmd.arg(&self.options.input_file);
-        cmd.arg("-o").arg(&preprocessed_path);
-
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to execute preprocessor: {e}"))?;
-        if !status.success() {
-            return Err("Preprocessing failed".to_string());
-        }
+        // ── Stage 2: preprocess via clang -E ─────────────────────────────────
+        let preprocessed_path = Preprocessor::run(
+            &self.options.input_file,
+            &self.options.include_paths,
+            &self.options.macros,
+        )?;
 
         if self.options.preprocess_only {
             let content = fs::read_to_string(&preprocessed_path)
-                .map_err(|e| format!("Failed to read preprocessed file: {e}"))?;
+                .map_err(|e| CompilerError::Io(format!("Failed to read preprocessed file: {e}")))?;
             println!("{content}");
             return Ok(());
         }
 
-        // 2. Read preprocessed source code
         let source_code = fs::read_to_string(&preprocessed_path)
-            .map_err(|e| format!("Failed to read preprocessed source file: {e}"))?;
+            .map_err(|e| CompilerError::Io(format!("Failed to read preprocessed source: {e}")))?;
 
-        // 3. Parse tokens
-        let mut parser = Parser::new(&source_code, &self.options.input_file);
-        let mut program = parser.parse_program();
+        // ── Stage 3: parse ────────────────────────────────────────────────────
+        let mut program = parse_source(&source_code, &self.options.input_file)?;
 
-        // Print parser errors if any
-        if !parser.errors.is_empty() {
-            for err in &parser.errors {
-                err.print(&source_code);
-            }
-            return Err("Parsing failed due to syntax errors".to_string());
+        // ── Stage 4: type-check ───────────────────────────────────────────────
+        typecheck_program(&mut program, &source_code, &self.options.input_file)?;
+
+        // ── Stage 5: code generation ──────────────────────────────────────────
+        let ir_str = generate_llvm_ir(&program, &self.options.input_file)?;
+
+        // ── Stage 6: write output ─────────────────────────────────────────────
+        let ll_path = write_llvm_ir_to_temp(&ir_str)?;
+
+        let output_name = resolve_output_name(input_path, &self.options);
+
+        OutputWriter::emit(&ll_path, &output_name, &self.options)
+    }
+}
+
+// ─── Stage helpers ────────────────────────────────────────────────────────────
+
+/// Read the raw (un-preprocessed) source file from disk.
+fn read_source_file(path: &Path, filename: &str) -> Result<String, CompilerError> {
+    if !path.exists() {
+        return Err(CompilerError::Io(format!(
+            "Input file '{filename}' does not exist"
+        )));
+    }
+    fs::read_to_string(path)
+        .map_err(|e| CompilerError::Io(format!("Failed to read input file: {e}")))
+}
+
+/// Parse preprocessed source and return the program AST.
+fn parse_source(source_code: &str, filename: &str) -> Result<crate::ast::Program, CompilerError> {
+    let mut parser = Parser::new(source_code, filename);
+    let program = parser.parse_program();
+    if !parser.errors.is_empty() {
+        for err in &parser.errors {
+            err.print(source_code);
         }
+        return Err(CompilerError::ParseError);
+    }
+    Ok(program)
+}
 
-        // 4. Typecheck & Semantic Analysis
-        let mut typechecker = Typechecker::new(&self.options.input_file);
-        if let Err(errors) = typechecker.check_program(&mut program) {
-            for err in &errors {
-                err.print(&source_code);
-            }
-            return Err("Typechecking failed".to_string());
+/// Run the type-checker / semantic analyser over the AST.
+fn typecheck_program(
+    program: &mut crate::ast::Program,
+    source_code: &str,
+    filename: &str,
+) -> Result<(), CompilerError> {
+    let mut typechecker = Typechecker::new(filename);
+    if let Err(errors) = typechecker.check_program(program) {
+        for err in &errors {
+            err.print(source_code);
         }
+        return Err(CompilerError::TypeCheckError);
+    }
+    Ok(())
+}
 
-        // 5. Code Generation
-        let context = Context::create();
-        let module = context.create_module(&self.options.input_file);
-        let builder = context.create_builder();
+/// Lower the AST to LLVM IR and return it as a string.
+fn generate_llvm_ir(
+    program: &crate::ast::Program,
+    filename: &str,
+) -> Result<String, CompilerError> {
+    let context = Context::create();
+    let module = context.create_module(filename);
+    let builder = context.create_builder();
 
-        let mut codegen = Codegen::new(&context, &module, &builder, &self.options.input_file);
-        codegen.gen_program(&program);
+    let mut codegen = Codegen::new(&context, &module, &builder, filename);
+    codegen.gen_program(program);
 
-        // 6. Write output
-        let ir_str = module.print_to_string().to_string();
-        let ll_temp = tempfile::Builder::new()
-            .suffix(".ll")
+    Ok(module.print_to_string().to_string())
+}
+
+/// Write LLVM IR to a temporary `.ll` file and return its path.
+fn write_llvm_ir_to_temp(ir_str: &str) -> Result<String, CompilerError> {
+    let ll_temp = tempfile::Builder::new()
+        .suffix(".ll")
+        .tempfile()
+        .map_err(|e| CompilerError::Io(format!("Failed to create temporary LLVM IR file: {e}")))?;
+    let ll_path = ll_temp.path().to_str().unwrap().to_string();
+    // Keep the NamedTempFile alive for the duration of this function so the OS
+    // does not delete it.  We persist (convert to path) so it survives.
+    ll_temp
+        .keep()
+        .map_err(|e| CompilerError::Io(format!("Failed to persist temp file: {e}")))?;
+    fs::write(&ll_path, ir_str)
+        .map_err(|e| CompilerError::Io(format!("Failed to write LLVM IR: {e}")))?;
+    Ok(ll_path)
+}
+
+/// Compute the final output path from options.
+fn resolve_output_name(input_path: &Path, options: &DriverOptions) -> String {
+    options.output_file.clone().unwrap_or_else(|| {
+        if options.compile_only {
+            input_path.with_extension("o").to_str().unwrap().to_string()
+        } else if options.assemble_only {
+            input_path.with_extension("s").to_str().unwrap().to_string()
+        } else if options.emit_llvm {
+            input_path
+                .with_extension("ll")
+                .to_str()
+                .unwrap()
+                .to_string()
+        } else {
+            "a.out".to_string()
+        }
+    })
+}
+
+// ─── ForbiddenConstructChecker ────────────────────────────────────────────────
+
+/// Checks source text for constructs that are unconditionally forbidden in
+/// Safe-C mode **before** preprocessing.
+///
+/// **Single responsibility**: this struct knows only about forbidden patterns.
+/// It does not read files, parse tokens, or produce LLVM IR.
+struct ForbiddenConstructChecker;
+
+impl ForbiddenConstructChecker {
+    fn check(content: &str) -> Result<(), CompilerError> {
+        check_keyword_redefinitions(content).map_err(CompilerError::ForbiddenConstruct)?;
+
+        if content.contains("#include <setjmp.h>") {
+            return Err(CompilerError::ForbiddenConstruct(
+                "Header <setjmp.h> is forbidden in Safe C mode".to_string(),
+            ));
+        }
+        if is_identifier_present(content, "setjmp") || is_identifier_present(content, "longjmp") {
+            return Err(CompilerError::ForbiddenConstruct(
+                "setjmp/longjmp are forbidden in Safe C mode (use structured control flow)"
+                    .to_string(),
+            ));
+        }
+        if content.contains("#include <threads.h>") || content.contains("#include <pthread.h>") {
+            return Err(CompilerError::ForbiddenConstruct(
+                "Multi-threading headers are forbidden in Safe C mode".to_string(),
+            ));
+        }
+        if content.contains("__asm__") || content.contains("asm(") {
+            return Err(CompilerError::ForbiddenConstruct(
+                "Inline assembly is forbidden in Safe C mode".to_string(),
+            ));
+        }
+        if is_identifier_present(content, "asm") {
+            return Err(CompilerError::ForbiddenConstruct(
+                "Inline assembly is forbidden in Safe C mode".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ─── Preprocessor ─────────────────────────────────────────────────────────────
+
+/// Invokes `clang -E` and returns the path to the preprocessed output file.
+///
+/// **Single responsibility**: knows only how to run the C preprocessor.
+struct Preprocessor;
+
+impl Preprocessor {
+    fn run(
+        input_file: &str,
+        include_paths: &[String],
+        macros: &[String],
+    ) -> Result<String, CompilerError> {
+        let preprocessed_temp = tempfile::Builder::new()
+            .suffix(".i")
             .tempfile()
-            .map_err(|e| format!("Failed to create temporary LLVM IR file: {e}"))?;
+            .map_err(|e| CompilerError::Io(format!("Failed to create temporary file: {e}")))?;
+        let preprocessed_path = preprocessed_temp.path().to_str().unwrap().to_string();
+        preprocessed_temp
+            .keep()
+            .map_err(|e| CompilerError::Io(format!("Failed to persist temp file: {e}")))?;
 
-        let ll_path = ll_temp.path().to_str().unwrap().to_string();
-        fs::write(&ll_path, &ir_str).map_err(|e| format!("Failed to write LLVM IR: {e}"))?;
-
-        let output_name = self.options.output_file.clone().unwrap_or_else(|| {
-            if self.options.compile_only {
-                input_path.with_extension("o").to_str().unwrap().to_string()
-            } else if self.options.assemble_only {
-                input_path.with_extension("s").to_str().unwrap().to_string()
-            } else if self.options.emit_llvm {
-                input_path
-                    .with_extension("ll")
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            } else {
-                "a.out".to_string()
-            }
-        });
-
-        if self.options.emit_llvm {
-            fs::copy(&ll_path, &output_name)
-                .map_err(|e| format!("Failed to write LLVM IR output: {e}"))?;
-            return Ok(());
-        }
-
-        if self.options.assemble_only {
-            // Compile LLVM IR to Assembly
-            let mut cmd = Command::new("clang");
-            cmd.arg("-S")
-                .arg(format!("-O{}", self.options.optimization_level))
-                .arg(&ll_path)
-                .arg("-o")
-                .arg(&output_name);
-            let status = cmd
-                .status()
-                .map_err(|e| format!("Failed to run compiler: {e}"))?;
-            if !status.success() {
-                return Err("Assembly generation failed".to_string());
-            }
-            return Ok(());
-        }
-
-        if self.options.compile_only {
-            // Compile LLVM IR to Object file
-            let mut cmd = Command::new("clang");
-            cmd.arg("-c")
-                .arg(format!("-O{}", self.options.optimization_level))
-                .arg(&ll_path)
-                .arg("-o")
-                .arg(&output_name);
-            let status = cmd
-                .status()
-                .map_err(|e| format!("Failed to run compiler: {e}"))?;
-            if !status.success() {
-                return Err("Object code generation failed".to_string());
-            }
-            return Ok(());
-        }
-
-        // Link executable with runtime static library
         let mut cmd = Command::new("clang");
-        cmd.arg(format!("-O{}", self.options.optimization_level))
-            .arg(&ll_path);
+        cmd.arg("-E");
+        for inc in include_paths {
+            cmd.arg(format!("-I{inc}"));
+        }
+        for mac in macros {
+            cmd.arg(format!("-D{mac}"));
+        }
+        cmd.arg(input_file).arg("-o").arg(&preprocessed_path);
 
-        let mut rt_path = None;
+        let status = cmd
+            .status()
+            .map_err(|e| CompilerError::Io(format!("Failed to execute preprocessor: {e}")))?;
+        if !status.success() {
+            return Err(CompilerError::Io("Preprocessing failed".to_string()));
+        }
+        Ok(preprocessed_path)
+    }
+}
 
-        // 1. Try finding it in the same directory as the compiler executable
+// ─── OutputWriter ─────────────────────────────────────────────────────────────
+
+/// Converts the LLVM IR temp file into the final requested output format by
+/// invoking `clang` (for `.o`, `.s`) or the `Linker` (for executables).
+///
+/// **Single responsibility**: knows only about the output-format decision tree.
+struct OutputWriter;
+
+impl OutputWriter {
+    fn emit(
+        ll_path: &str,
+        output_name: &str,
+        options: &DriverOptions,
+    ) -> Result<(), CompilerError> {
+        if options.emit_llvm {
+            fs::copy(ll_path, output_name)
+                .map_err(|e| CompilerError::Io(format!("Failed to write LLVM IR output: {e}")))?;
+            return Ok(());
+        }
+
+        if options.assemble_only {
+            let status = Command::new("clang")
+                .arg("-S")
+                .arg(format!("-O{}", options.optimization_level))
+                .arg(ll_path)
+                .arg("-o")
+                .arg(output_name)
+                .status()
+                .map_err(|e| CompilerError::Io(format!("Failed to run compiler: {e}")))?;
+            if !status.success() {
+                return Err(CompilerError::AssemblyError);
+            }
+            return Ok(());
+        }
+
+        if options.compile_only {
+            let status = Command::new("clang")
+                .arg("-c")
+                .arg(format!("-O{}", options.optimization_level))
+                .arg(ll_path)
+                .arg("-o")
+                .arg(output_name)
+                .status()
+                .map_err(|e| CompilerError::Io(format!("Failed to run compiler: {e}")))?;
+            if !status.success() {
+                return Err(CompilerError::AssemblyError);
+            }
+            return Ok(());
+        }
+
+        // Full link
+        Linker::link(ll_path, output_name, options.optimization_level)
+    }
+}
+
+// ─── Linker ───────────────────────────────────────────────────────────────────
+
+/// Resolves the runtime static library path and invokes the system linker.
+///
+/// **Single responsibility**: knows only about finding `libstricc_rt.a` and
+/// invoking `clang` for final linking.
+struct Linker;
+
+impl Linker {
+    fn link(ll_path: &str, output_name: &str, opt_level: u32) -> Result<(), CompilerError> {
+        let rt_lib = Self::resolve_runtime_lib();
+
+        let status = Command::new("clang")
+            .arg(format!("-O{opt_level}"))
+            .arg(ll_path)
+            .arg(&rt_lib)
+            .arg("-o")
+            .arg(output_name)
+            .status()
+            .map_err(|e| CompilerError::Io(format!("Failed to run linker: {e}")))?;
+
+        if !status.success() {
+            return Err(CompilerError::LinkError);
+        }
+        Ok(())
+    }
+
+    /// Search for `libstricc_rt.a` in the following order:
+    ///
+    /// 1. Same directory as the running compiler executable.
+    /// 2. `STRICC_RT_PATH` environment variable.
+    /// 3. `target/{debug,release}/` relative to the Cargo workspace root
+    ///    (detected via `CARGO_MANIFEST_DIR` or a hard-coded fallback).
+    fn resolve_runtime_lib() -> String {
+        // 1. Alongside the compiler binary
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 let candidate = exe_dir.join("libstricc_rt.a");
                 if candidate.exists() {
-                    rt_path = Some(candidate.to_str().unwrap().to_string());
+                    return candidate.to_str().unwrap().to_string();
                 }
             }
         }
 
-        // 2. Try STRICC_RT_PATH environment variable
-        if rt_path.is_none() {
-            if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
-                if Path::new(&env_path).exists() {
-                    rt_path = Some(env_path);
-                }
+        // 2. Environment variable
+        if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
+            if Path::new(&env_path).exists() {
+                return env_path;
             }
         }
 
-        // 3. Fallback to workspace root directory (dynamically detected or default)
-        if rt_path.is_none() {
-            let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                PathBuf::from(dir).parent().unwrap().to_path_buf()
-            } else {
-                PathBuf::from("/Users/diegoj/repos/stricc")
-            };
-            let possible_rt_paths = vec![
-                workspace_root.join("target/debug/libstricc_rt.a"),
-                workspace_root.join("target/release/libstricc_rt.a"),
-            ];
-            for path in &possible_rt_paths {
-                if path.exists() {
-                    rt_path = Some(path.to_str().unwrap().to_string());
-                    break;
-                }
-            }
-        }
-
-        let rt_lib = match rt_path {
-            Some(p) => p,
-            None => {
-                // If not found, guess debug path in default workspace root
-                "/Users/diegoj/repos/stricc/target/debug/libstricc_rt.a".to_string()
-            }
+        // 3. Workspace root heuristic
+        let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            PathBuf::from(dir)
+                .parent()
+                .expect("CARGO_MANIFEST_DIR has no parent")
+                .to_path_buf()
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("CARGO_MANIFEST_DIR has no parent")
+                .to_path_buf()
         };
 
-        cmd.arg(rt_lib);
-        cmd.arg("-o").arg(&output_name);
-
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to run linker: {e}"))?;
-        if !status.success() {
-            return Err("Linking failed".to_string());
+        for sub in &[
+            "target/debug/libstricc_rt.a",
+            "target/release/libstricc_rt.a",
+        ] {
+            let candidate = workspace_root.join(sub);
+            if candidate.exists() {
+                return candidate.to_str().unwrap().to_string();
+            }
         }
 
-        Ok(())
+        // Last resort: compile-time known path (replaces hardcoded runtime string)
+        workspace_root
+            .join("target/debug/libstricc_rt.a")
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 }
+
+// ─── Low-level text utilities ─────────────────────────────────────────────────
+//
+// These are pure text-processing functions used by `ForbiddenConstructChecker`.
+// They are private to this module.
 
 fn strip_line_continuations(content: &str) -> String {
     content.replace("\\\r\n", "").replace("\\\n", "")
@@ -289,7 +477,7 @@ fn strip_comments(content: &str) -> String {
             if c == '*' && chars.peek() == Some(&'/') {
                 chars.next();
                 in_block_comment = false;
-                result.push(' '); // Replacing block comment with a space
+                result.push(' ');
             }
         } else if c == '/' && chars.peek() == Some(&'/') {
             chars.next();
@@ -348,12 +536,10 @@ fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
 
     for line in stripped.lines() {
         let trimmed = line.trim();
-        if let Some(stripped) = trimmed.strip_prefix('#') {
-            // Extract the rest of the directive
-            let rest = stripped.trim();
-            if let Some(stripped_define) = rest.strip_prefix("define") {
-                let rest_define = stripped_define.trim();
-                // Extract the identifier name
+        if let Some(rest_after_hash) = trimmed.strip_prefix('#') {
+            let rest = rest_after_hash.trim();
+            if let Some(rest_define) = rest.strip_prefix("define") {
+                let rest_define = rest_define.trim();
                 let mut macro_name = String::new();
                 for c in rest_define.chars() {
                     if c.is_alphanumeric() || c == '_' {
@@ -373,8 +559,7 @@ fn check_keyword_redefinitions(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Returns true if `word` appears in `content` as a standalone identifier
-/// (not as a prefix/suffix of another identifier character).
+/// Returns `true` if `word` appears in `content` as a standalone identifier.
 fn is_identifier_present(content: &str, word: &str) -> bool {
     let bytes = content.as_bytes();
     let word_bytes = word.as_bytes();

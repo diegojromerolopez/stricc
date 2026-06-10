@@ -1,51 +1,7 @@
 use crate::ast::*;
 use crate::error::{Diagnostic, Span};
+use crate::symbol_table::SymbolTable;
 use std::collections::{HashMap, HashSet};
-
-pub struct SymbolTable<T> {
-    scopes: Vec<HashMap<String, T>>,
-}
-
-impl<T: Clone> Default for SymbolTable<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T: Clone> SymbolTable<T> {
-    pub fn new() -> Self {
-        Self {
-            scopes: vec![HashMap::new()],
-        }
-    }
-
-    pub fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    pub fn exit_scope(&mut self) {
-        self.scopes.pop();
-    }
-
-    pub fn insert(&mut self, name: String, val: T) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, val);
-        }
-    }
-
-    pub fn lookup(&self, name: &str) -> Option<T> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(name) {
-                return Some(val.clone());
-            }
-        }
-        None
-    }
-
-    pub fn lookup_current(&self, name: &str) -> Option<T> {
-        self.scopes.last().and_then(|s| s.get(name).cloned())
-    }
-}
 
 pub struct Typechecker {
     variables: SymbolTable<Type>,
@@ -1140,15 +1096,13 @@ impl Typechecker {
                         ));
                     }
                 }
-                'p' => {
-                    if !arg_ty.is_pointer() {
-                        return Err(Diagnostic::error_with_span(
-                            format!("Format specifier %{spec} expects pointer, found {arg_ty:?}"),
-                            args[arg_idx].span,
-                            "Format mismatch".to_string(),
-                            &self.filename,
-                        ));
-                    }
+                'p' if !arg_ty.is_pointer() => {
+                    return Err(Diagnostic::error_with_span(
+                        format!("Format specifier %{spec} expects pointer, found {arg_ty:?}"),
+                        args[arg_idx].span,
+                        "Format mismatch".to_string(),
+                        &self.filename,
+                    ));
                 }
                 _ => {}
             }

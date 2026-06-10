@@ -1,6 +1,50 @@
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use std::ops::Range;
 
+// ─── DiagnosticSink trait ────────────────────────────────────────────────────
+
+/// A consumer of compiler diagnostics.
+///
+/// Implement this trait to redirect diagnostics anywhere (stderr, a buffer,
+/// a test harness, a language-server JSON channel, etc.).  The default
+/// implementation used in production is [`StderrDiagnosticSink`].
+pub trait DiagnosticSink {
+    /// Receive a single diagnostic together with the relevant source text.
+    fn emit(&mut self, diag: &Diagnostic, source: &str);
+}
+
+/// A [`DiagnosticSink`] that renders diagnostics to **stderr** using ariadne.
+///
+/// This is the production default used by [`crate::driver::Driver`].
+pub struct StderrDiagnosticSink;
+
+impl DiagnosticSink for StderrDiagnosticSink {
+    fn emit(&mut self, diag: &Diagnostic, source: &str) {
+        diag.print(source);
+    }
+}
+
+/// A [`DiagnosticSink`] that **collects** diagnostics into a `Vec` instead of
+/// printing them. Useful in unit / integration tests that need to inspect
+/// emitted diagnostics programmatically without polluting test output.
+#[derive(Default)]
+pub struct CollectingDiagnosticSink {
+    pub collected: Vec<Diagnostic>,
+}
+
+impl CollectingDiagnosticSink {
+    /// Create an empty collecting sink.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl DiagnosticSink for CollectingDiagnosticSink {
+    fn emit(&mut self, diag: &Diagnostic, _source: &str) {
+        self.collected.push(diag.clone());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,

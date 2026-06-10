@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use stricc::driver::{Driver, DriverOptions};
+use stricc::driver::{CompilerPipeline, Driver, DriverOptions};
 
 fn main() {
     let matches = Command::new("stricc")
@@ -92,8 +92,8 @@ fn main() {
         .map(|s| s.to_string())
         .collect();
 
-    // For multi-file compilation, compile each input file and link if necessary
     if inputs.len() == 1 {
+        // Single input — straightforward pipeline
         let options = DriverOptions {
             input_file: inputs[0].clone(),
             output_file,
@@ -111,14 +111,16 @@ fn main() {
             std::process::exit(1);
         }
     } else {
+        // Multiple inputs
         if preprocess_only || emit_llvm || assemble_only {
             eprintln!(
-                "stricc: error: cannot specify -E, -S, or -emit-llvm with multiple input files"
+                "stricc: error: cannot specify -E, -S, or --emit-llvm with multiple input files"
             );
             std::process::exit(1);
         }
 
         if compile_only {
+            // Compile each input to its own object file
             for input in &inputs {
                 let options = DriverOptions {
                     input_file: input.clone(),
@@ -138,6 +140,7 @@ fn main() {
                 }
             }
         } else {
+            // Compile each input to a temp object file, then link them all
             let mut obj_files = Vec::new();
             let mut temp_files = Vec::new();
 
@@ -165,6 +168,7 @@ fn main() {
                 temp_files.push(temp_obj);
             }
 
+            // Final link step (reuse Linker logic via a direct clang call)
             let output_name = output_file.unwrap_or_else(|| "a.out".to_string());
             let mut cmd = std::process::Command::new("clang");
             cmd.arg(format!("-O{opt_level}"));
@@ -172,47 +176,10 @@ fn main() {
                 cmd.arg(obj);
             }
 
-            let mut rt_path = None;
-            if let Ok(exe_path) = std::env::current_exe() {
-                if let Some(exe_dir) = exe_path.parent() {
-                    let candidate = exe_dir.join("libstricc_rt.a");
-                    if candidate.exists() {
-                        rt_path = Some(candidate.to_str().unwrap().to_string());
-                    }
-                }
-            }
-            if rt_path.is_none() {
-                if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
-                    if std::path::Path::new(&env_path).exists() {
-                        rt_path = Some(env_path);
-                    }
-                }
-            }
-            if rt_path.is_none() {
-                let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                    std::path::PathBuf::from(dir)
-                        .parent()
-                        .unwrap()
-                        .to_path_buf()
-                } else {
-                    std::path::PathBuf::from("/Users/diegoj/repos/stricc")
-                };
-                let possible_rt_paths = vec![
-                    workspace_root.join("target/debug/libstricc_rt.a"),
-                    workspace_root.join("target/release/libstricc_rt.a"),
-                ];
-                for path in &possible_rt_paths {
-                    if path.exists() {
-                        rt_path = Some(path.to_str().unwrap().to_string());
-                        break;
-                    }
-                }
-            }
-            let rt_lib = rt_path.unwrap_or_else(|| {
-                "/Users/diegoj/repos/stricc/target/debug/libstricc_rt.a".to_string()
-            });
-            cmd.arg(rt_lib);
-            cmd.arg("-o").arg(&output_name);
+            // Runtime lib path is resolved the same way as in Linker::resolve_runtime_lib().
+            // We replicate it here to avoid making Linker public — the actual logic is in driver.rs.
+            let rt_lib = resolve_rt_lib_path();
+            cmd.arg(rt_lib).arg("-o").arg(&output_name);
 
             let status = cmd
                 .status()
@@ -224,4 +191,48 @@ fn main() {
             }
         }
     }
+}
+
+/// Resolve the runtime library path for the multi-file link step.
+///
+/// Mirrors `Linker::resolve_runtime_lib` in `driver.rs`.
+fn resolve_rt_lib_path() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("libstricc_rt.a");
+            if candidate.exists() {
+                return candidate.to_str().unwrap().to_string();
+            }
+        }
+    }
+    if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
+        if std::path::Path::new(&env_path).exists() {
+            return env_path;
+        }
+    }
+    let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        std::path::PathBuf::from(dir)
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    } else {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    };
+    for sub in &[
+        "target/debug/libstricc_rt.a",
+        "target/release/libstricc_rt.a",
+    ] {
+        let candidate = workspace_root.join(sub);
+        if candidate.exists() {
+            return candidate.to_str().unwrap().to_string();
+        }
+    }
+    workspace_root
+        .join("target/debug/libstricc_rt.a")
+        .to_str()
+        .unwrap()
+        .to_string()
 }

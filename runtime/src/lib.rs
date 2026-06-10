@@ -162,7 +162,7 @@ unsafe fn setup_alt_stack() {
 unsafe fn register_signal_handler() {
     setup_alt_stack();
     let mut sa: libc::sigaction = std::mem::zeroed();
-    sa.sa_sigaction = sigsegv_handler as libc::sighandler_t;
+    sa.sa_sigaction = sigsegv_handler as *const () as libc::sighandler_t;
     sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
     libc::sigemptyset(&mut sa.sa_mask);
     libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
@@ -758,7 +758,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 #[no_mangle]
 pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
     let is_power_of_two = alignment > 0 && (alignment & (alignment - 1)) == 0;
-    let is_multiple = size % alignment == 0;
+    let is_multiple = size.is_multiple_of(alignment);
 
     if !is_power_of_two || !is_multiple {
         write_stderr(b"stricc dynamic check failure: Invalid alignment or size in aligned_alloc\n");
