@@ -79,6 +79,69 @@ stricc: runtime check failed (Temporal Safety Key Mismatch)
 
 ---
 
+## Undefined Behavior (UB) Mitigation Specification
+
+The C standard lists numerous undefined behaviors. `stricc` mitigates every standard UB through three distinct mechanisms: **Defined Semantics (Non-Aborting)**, **Controlled Runtime Aborts (Traps)**, and **Compile-Time Rejection (Static Analysis)**.
+
+### 1. Defined Semantics (Non-Aborting)
+
+These behaviors, which are undefined in standard C, are assigned safe, deterministic, non-aborting semantics:
+
+| Standard C Undefined Behavior | `stricc` Defined Semantics | Technical Explanation / Example |
+| :--- | :--- | :--- |
+| **Uninitialized Variable/Pointer Reads** | **Safe Default Initialization** | Automatically zero-initializes all local/global variables, pointers, and structures to type-specific defaults (e.g., `0` for integers, `nullptr` for pointers, and static `""` empty string literal for character pointers). |
+| **Out-of-Bounds Bit Shifts** | **Modulo Shift Masking** | Shifts are restricted by bitwise-masking the shift amount to the bit-width of the operand: `shift_count & (bit_width - 1)`. For example, a shift by `35` on a 32-bit integer is safely resolved as a shift by `3`. |
+| **Overlapping Memory Copy (`memcpy`)** | **Safe Copying (`memmove` Fallback)** | Overlapping buffers passed to `memcpy` are automatically handled as a `memmove` under the hood, preventing memory overlap corruptions. |
+| **`NULL` Arguments to `memcpy` / `memset`** | **Safe No-Op on Zero Size** | Passing `NULL` to library memory/string functions is defined as a safe no-op if the size parameter `n` is `0` (e.g., `memcpy(NULL, NULL, 0)` executes safely without trapping). |
+| **Strict Aliasing Violations** | **Defined Type Punning** | Type punning is fully defined. `stricc` disables strict-aliasing optimization assumptions (behaves like `-fno-strict-aliasing`), reading and writing the raw bit patterns in memory. |
+| **Union Active Member Mismatch** | **Defined Bitcast** | Reading an inactive union member is defined to yield the bitcast/reload representation of the underlying active member's bits. |
+| **Cross-Allocation Pointer Comparisons** | **Defined Total Ordering** | Relational comparisons (`<`, `>`, `<=`, `>=`) on pointers from different allocations compare their absolute virtual address values. |
+| **Incorrect Use of `restrict`** | **Defined Aliased Memory** | The `restrict` keyword is parsed but completely ignored during code generation, preventing LLVM from optimizing under incorrect aliasing assumptions. |
+| **Evaluation Order & Sequence Points** | **Defined Left-to-Right Evaluation** | Operand evaluations and function arguments are evaluated strictly from left to right (e.g., in `f(g(), h())`, `g()` is guaranteed to execute before `h()`). |
+| **Invalid `bool` Value (Trap Representation)** | **Guaranteed Normalization** | Loaded boolean values are forced to be sanitized/normalized using a `!= 0` check in LLVM IR, preventing invalid bit representations. |
+| **Floating-Point Overflow** | **Defined IEEE-754 Semantics** | Floating-point operations strictly follow IEEE-754 rules, cleanly producing `INFINITY` or `NaN` without undefined compiler assumptions. |
+| **Unsigned Integer Overflow** | **Modulo Wrapping** | Wraps deterministically using two's complement modulo arithmetic. |
+
+### 2. Controlled Runtime Aborts (Traps)
+
+For behaviors that threaten memory or execution safety, `stricc` emits runtime checks that immediately abort execution safely and print a DWARF-symbolicated backtrace instead of allowing silent corruption:
+
+| Standard C Undefined Behavior | `stricc` Safe Mitigation | Implementation / Error Output |
+| :--- | :--- | :--- |
+| **Out-of-Bounds Memory Access** | **Spatial Safety Bounds Check** | Tracks pointer ranges dynamically using a shadow metadata table. Dereferences assert that `base <= ptr < base + size`. |
+| **Use-After-Free & Double Free** | **Temporal Safety Key Check** | Generates unique keys for allocations. Frees and dereferences assert that the pointer's key matches the current live allocation key. |
+| **Null Pointer Dereference** | **Guaranteed Pointer Null Check** | Intercepted by shadow checks (as null pointers map to size `0` in shadow metadata) or explicit validation before wildcard returns. |
+| **Division / Modulo by Zero** | **Controlled Division Zero Check** | Injects checks before division instructions. Aborts with a clear diagnostic if the divisor is `0`. |
+| **Integer Division Overflow** | **Controlled Overflow Check** | Aborts cleanly on signed arithmetic overflows such as `INT_MIN / -1` or `INT_MIN % -1`. |
+| **Signed Integer Overflow** | **Controlled Overflow Trap** | Promotes math operations to LLVM intrinsics with overflow flags (e.g. `@llvm.sadd.with.overflow`). Aborts on overflow by default. |
+| **Float-to-Int Conversion Overflow** | **Conversion Range Check** | Emits bounds validation checks before converting floats/doubles to integers, aborting if the value is out of bounds. |
+| **Unaligned Memory Access** | **Alignment Verification** | Verifies pointer alignment using the target type's natural alignment before dereference. |
+| **Mismatched Function Pointer Call** | **Control Flow Integrity (CFI)** | Validates indirect function pointer calls against a unique type signature hash before jump execution. |
+| **Stack Overflow** | **Stack Clash Protection** | Compiles with stack probes (`-fstack-clash-protection`) and traps guard-page faults cleanly via a custom signal handler. |
+| **Invalid VLA Size** | **VLA Size Check** | Asserts that variable-length array sizes are strictly greater than `0` before dynamic stack allocation. |
+| **Non-Null-Terminated String Library Inputs** | **String Bounds Verification** | Wraps library calls (`strlen`, `strcpy`, etc.) to query shadow size and verify a null terminator exists within the allocation. |
+| **ctype Library Out-of-Range Arguments** | **ctype Arguments Check** | Wraps `ctype` functions (`isalpha`, `isdigit`, etc.) to assert that arguments reside within `[-1, 255]`. |
+| **Invalid Allocation Alignment** | **aligned_alloc Bounds Check** | Wraps `aligned_alloc` to assert that alignment is a valid power of 2 and size is a multiple of alignment. |
+| **Modifying Const / String Literals** | **Write Safety Verification** | Stored in read-only segments (`.rodata`) and key-mapped in shadow metadata to trigger hardware page faults or write traps. |
+| **Failed realloc Size Restoration** | **realloc Size Restoration** | Restores the original shadow size of the pointer if a `realloc` fails and returns `NULL`, preventing subsequent out-of-bounds bypasses. |
+
+### 3. Compile-Time Rejections (Static Analysis)
+
+Certain behaviors are prevented entirely by the compiler frontend, which rejects compilation with clear diagnostic messages:
+
+| Standard C Undefined Behavior | `stricc` Prevention | Detection Phase / Mechanism |
+| :--- | :--- | :--- |
+| **Reaching End of Non-Void Function** | **Definite Return Analysis** | Semantic analyzer verifies that all control-flow paths return a value or diverge (e.g. call `abort()`). |
+| **Stack Use-After-Free / Escaping Stack** | **Escape & Lifetime Analysis** | Lexical scope lifetime analysis rejects returning addresses of stack-allocated variables or assigning them to outer-scope pointers. |
+| **Inline Assembly & setjmp/longjmp** | **Forbidden Features Rejection** | Disallows `__asm__`, `setjmp`, and `longjmp` keyword usage in safe compilation mode. |
+| **Multithreading Data Races** | **Thread-Safety & Lock Verification** | Statically rejects unannotated multithreading code, enforcing `_Atomic` qualifiers or checking static mutex-lock annotations. |
+| **Format String Mismatches** | **Format Specifier Type Checker** | Statically type-checks format arguments against string specifiers for constant formatting literals. |
+| **Link-Time Incompatible Globals** | **Interprocedural Type Validation** | Compares global variable types across translation units during Link-Time Optimization (LTO) and rejects mismatching linkages. |
+| **Keyword Redefinition** | **Preprocessor Macro Restrictions** | Rejects macro definitions attempting to redefine language keywords (e.g., `#define int double`) or reserved identifiers. |
+| **Local Block-Scope Variable Escape** | **Block Scope Escape Analysis** | Detects and blocks local variables whose addresses escape their immediate defining scope. |
+
+---
+
 ## Technical Architecture & ABI Compatibility
 
 One of the biggest concerns C developers have when using "Safe C" dialects (like Checked C) is **compatibility** and **performance overhead**. 
@@ -149,3 +212,67 @@ cargo test --workspace
 # Run integration safety checks specifically
 cargo test --package stricc --test runner
 ```
+
+---
+
+## Developer Guide & Contributing
+
+If you are a newcomer looking to work on the `stricc` compiler itself, this section will help you set up your environment and understand the codebase layout.
+
+### 1. Developer Prerequisites
+
+`stricc` relies on the `inkwell` crate to bind to the LLVM 18 C++ APIs. In addition to installing LLVM 18, your compiler needs to be able to locate the `llvm-config` binary during the build process.
+
+*   **macOS (Homebrew)**:
+    Install LLVM 18:
+    ```bash
+    brew install llvm@18
+    ```
+    Before running `cargo build` or `cargo test`, set the following environment variables:
+    ```bash
+    export LLVM_SYS_180_PREFIX="/opt/homebrew/opt/llvm@18"
+    export PATH="/opt/homebrew/opt/llvm@18/bin:$PATH"
+    ```
+*   **Ubuntu/Debian**:
+    Ensure LLVM 18 is installed and `llvm-config-18` is in your `PATH` or symlinked as `llvm-config`.
+
+### 2. Codebase & Directory Layout
+
+The workspace is divided into two primary crates: the compiler driver and the runtime support library.
+
+*   **[`stricc/`](file:///Users/diegoj/repos/stricc/stricc)**: The compiler implementation.
+    *   [`src/lexer.rs`](file:///Users/diegoj/repos/stricc/stricc/src/lexer.rs): Tokenizes the preprocessed C source code.
+    *   [`src/parser.rs`](file:///Users/diegoj/repos/stricc/stricc/src/parser.rs): Hand-written recursive descent parser that parses tokens into the Abstract Syntax Tree (AST).
+    *   [`src/ast.rs`](file:///Users/diegoj/repos/stricc/stricc/src/ast.rs): Defines the AST nodes.
+    *   [`src/typechecker.rs`](file:///Users/diegoj/repos/stricc/stricc/src/typechecker.rs): Performs type validation, Value Range Propagation (VRP) to optimize bounds checks, escape analysis, and constant folding.
+    *   [`src/codegen.rs`](file:///Users/diegoj/repos/stricc/stricc/src/codegen.rs): Translates the AST to LLVM IR using `inkwell` and injects safety checks.
+    *   [`src/driver.rs`](file:///Users/diegoj/repos/stricc/stricc/src/driver.rs): Coordinates the compiler stages and manages host preprocessor delegation.
+    *   [`src/main.rs`](file:///Users/diegoj/repos/stricc/stricc/src/main.rs): Entrypoint for CLI parsing and flag emulation.
+*   **[`runtime/`](file:///Users/diegoj/repos/stricc/runtime)**: The runtime support library (`libstricc_rt.a`).
+    *   [`src/lib.rs`](file:///Users/diegoj/repos/stricc/runtime/src/lib.rs): Implements the memory allocation wrappers (`malloc`/`free`), shadow metadata table operations, stack overflow/signal handlers, and symbolicated DWARF backtrace reporting.
+
+Refer to the detailed specification in [PLAN.md](file:///Users/diegoj/repos/stricc/PLAN.md) for architectural guidelines.
+
+### 3. Local Development & Advanced Testing
+
+The root directory contains a `Makefile` that simplifies building and running the extended test suites:
+
+*   **Build the workspace**:
+    ```bash
+    make build
+    ```
+*   **Run all unit/integration tests**:
+    ```bash
+    make test
+    ```
+*   **Run the GCC C Torture Suite** (compares outputs against GCC for ~1,500 test cases):
+    ```bash
+    make test-gcc
+    ```
+*   **Run the LLVM Test Suite**:
+    ```bash
+    make test-llvm
+    ```
+
+Refer to [TEST.md](file:///Users/diegoj/repos/stricc/TEST.md) for a complete breakdown of the safety matrix and conformance suites.
+
