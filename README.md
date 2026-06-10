@@ -163,6 +163,33 @@ One of the biggest concerns C developers have when using "Safe C" dialects (like
 > [!TIP]
 > For the full list of compiler flags, detailed usage tutorials, and advanced compiler configurations, visit the [stricc CLI Usage & Integration Guide](https://stricc.readthedocs.io/en/latest/cli_usage.html) on Read the Docs.
 
+### Running with Docker (Alternative Setup)
+
+If you want to try `stricc` without installing LLVM 18, Rust, or other build tools on your local system, you can use the provided [Dockerfile.run](file:///Users/diegoj/repos/stricc/Dockerfile.run). This builds a lightweight sandbox container containing the compiler and all runtime dependencies.
+
+1. **Build the image**:
+   ```bash
+   docker build -f Dockerfile.run -t stricc-sandbox .
+   ```
+
+2. **Verify the installation**:
+   ```bash
+   docker run --rm stricc-sandbox stricc --help
+   ```
+
+3. **Compile and run local C programs**:
+   Mount your current directory into the container to compile C files using `stricc`. Note that since `stricc` targets a custom safe subset of C, platform-specific header includes (like `<stdio.h>`) are not directly supported; instead, declare functions like `printf` manually:
+   ```bash
+   # Create a test file
+   echo -e 'int printf(const char *format, ...);\nint main() { printf("Hello from stricc inside Docker!\\n"); return 0; }' > test.c
+
+   # Compile the file
+   docker run --rm -v "$(pwd)":/src stricc-sandbox stricc -o test test.c
+
+   # Run the binary
+   docker run --rm -v "$(pwd)":/src stricc-sandbox ./test
+   ```
+
 ### 1. Prerequisites
 `stricc` requires **LLVM 18** to compile and run.
 - **macOS**: `brew install llvm@18`

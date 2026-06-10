@@ -1,0 +1,69 @@
+# Stage 1: Build environment
+FROM alpine:3.21 AS builder
+
+# Install build dependencies, LLVM, Clang, and static libraries
+RUN apk add --no-cache \
+    curl \
+    build-base \
+    gcc \
+    musl-dev \
+    llvm18-dev \
+    llvm18-static \
+    clang18-dev \
+    libffi-dev \
+    zlib-dev \
+    zlib-static \
+    zstd-dev \
+    zstd-static \
+    ncurses-dev \
+    ncurses-static \
+    libxml2-dev \
+    libxml2-static \
+    libc++-static \
+    bash
+
+# Create dummy librt.a because musl integrates librt into libc.a
+# but LLVM queries still ask for -lrt
+RUN ar cr /usr/lib/librt.a
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:/usr/lib/llvm18/bin:${PATH}"
+ENV LLVM_SYS_180_PREFIX=/usr/lib/llvm18
+
+# Copy source code
+WORKDIR /usr/src/stricc
+COPY . .
+
+# Build workspace (both stricc compiler and runtime library)
+# We set target-feature=+crt-static only for the target to ensure static linking
+RUN TARGET_TRIPLE="$(uname -m)-unknown-linux-musl" && \
+    export CARGO_TARGET_$(echo $TARGET_TRIPLE | tr 'a-z-' 'A-Z_')_RUSTFLAGS="-C target-feature=+crt-static -L native=/usr/lib -l stdc++ -l c++abi -l gcc -l static=ffi -C link-arg=-Wl,--allow-multiple-definition" && \
+    export LIBRARY_PATH=/usr/lib && \
+    cargo build --release --workspace --target "$TARGET_TRIPLE" && \
+    mkdir -p target/release && \
+    cp target/$TARGET_TRIPLE/release/stricc target/release/stricc && \
+    cp target/$TARGET_TRIPLE/release/libstricc_rt.a target/release/libstricc_rt.a
+
+# Stage 2: Runtime environment
+FROM alpine:3.21
+
+# Install runtime dependencies (clang and musl-dev are needed for preprocessing and linking C files)
+RUN apk add --no-cache \
+    clang18 \
+    musl-dev \
+    gcc \
+    bash
+
+# Ensure "clang" is accessible in PATH as a standard symlink
+RUN ln -sf /usr/bin/clang-18 /usr/bin/clang
+
+# Copy the statically compiled stricc binary and runtime library from the builder
+COPY --from=builder /usr/src/stricc/target/release/stricc /usr/local/bin/stricc
+COPY --from=builder /usr/src/stricc/target/release/libstricc_rt.a /usr/local/bin/libstricc_rt.a
+
+# Create a directory for user code
+WORKDIR /src
+
+# Set the default command to run the stricc compiler help
+CMD ["stricc", "--help"]

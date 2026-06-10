@@ -55,6 +55,17 @@ Ensure safety traps are correctly emitted:
 * **`stricc/tests/defined/`**: C programs representing UB scenarios that `stricc` compiles with *predictable/defined behavior* (e.g. wrapping signed overflow, defined bitcasts).
 * **`stricc/tests/safety/`**: C programs that MUST trigger runtime safety checks and cause a clean runtime abort (e.g., division by zero, null pointer dereference, use-after-free).
 
+### 4. Sandbox Validation via Docker
+If the local machine lacks LLVM 18 or Rust, changes can be validated inside the Docker sandbox:
+```bash
+# Build the test image
+docker build -f Dockerfile.run -t stricc-sandbox .
+
+# Compile and execute a test file inside the sandbox
+docker run --rm -v "$(pwd)":/src stricc-sandbox stricc -o test input.c
+docker run --rm -v "$(pwd)":/src stricc-sandbox ./test
+```
+
 ---
 
 ## 🧱 Software Engineering Guardrails
@@ -107,6 +118,7 @@ stricc/
 │       ├── gcc_torture_runner.py
 │       └── llvm_test_suite_runner.py
 ├── Cargo.toml                  # Workspace root configuration
+├── Dockerfile.run              # Sandbox container for running/testing the compiler
 ├── Makefile                    # Build scripts for macOS and static Linux builds
 ├── PLAN.md                     # Compiler blueprint/UB specs
 ├── README.md                   # Setup guide
@@ -117,8 +129,9 @@ stricc/
 
 ## 🚀 GitHub Workflows
 
-The repository leverages four automated workflows:
+The repository leverages five automated workflows:
 1. **Lint (`.github/workflows/ci.yml`)**: Verifies code formatting via `rustfmt` and checks for clippy lints. Runs integration suites (GCC Torture, LLVM SingleSource).
 2. **Unit Tests (`.github/workflows/test_unit.yml`)**: Runs Rust unit tests and generates code coverage metrics with `cargo-llvm-cov`.
 3. **External Builds Stress Test (`.github/workflows/test_builds.yml`)**: Stress-tests compilation of external, real-world C projects (SQLite, Redis, TinyCC) using the freshly compiled `stricc` binary.
 4. **Release (`.github/workflows/release.yml`)**: Packages static Linux and native macOS binaries to Github Releases.
+5. **Docker Build & Test (`.github/workflows/docker_test.yml`)**: Verifies building the `Dockerfile.run` container and compiles/executes a test program inside the runner image to ensure end-to-end compiler correctness.

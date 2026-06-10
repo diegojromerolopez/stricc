@@ -1,0 +1,43 @@
+name: Docker Build & Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-docker:
+    name: Build & Test via Docker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: |
+          docker build -f Dockerfile.run -t stricc-sandbox .
+
+      - name: Create Minimal C Program
+        run: |
+          cat << 'EOF' > test.c
+          int printf(const char *format, ...);
+          int main() {
+              printf("Hello from stricc inside GitHub Actions Docker!\n");
+              return 0;
+          }
+          EOF
+
+      - name: Compile C Program inside Docker
+        run: |
+          docker run --rm -v "$(pwd)":/src stricc-sandbox stricc -o test test.c
+
+      - name: Execute Compiled C Program
+        run: |
+          OUTPUT=$(docker run --rm -v "$(pwd)":/src stricc-sandbox ./test)
+          echo "Output: $OUTPUT"
+          if [ "$OUTPUT" != "Hello from stricc inside GitHub Actions Docker!" ]; then
+              echo "Error: Output mismatch!"
+              exit 1
+          fi
