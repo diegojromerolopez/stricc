@@ -15,6 +15,9 @@ Written in Rust, utilizing LLVM (`inkwell`) for optimizing code generation, `str
 > [!NOTE]
 > Read the online documentation on [Read the Docs](https://stricc.readthedocs.io/en/latest/) or review the full architectural specifications and implementation details in [PLAN.md](file:///Users/diegoj/repos/stricc/PLAN.md).
 
+> [!WARNING]
+> This project has been vibe-coded. Expect experimental features, rapid changes, and potential vibes.
+
 ---
 
 ## Why `stricc`? (Comparison with GCC)
@@ -302,4 +305,19 @@ The root directory contains a `Makefile` that simplifies building and running th
     ```
 
 Refer to [TEST.md](file:///Users/diegoj/repos/stricc/TEST.md) for a complete breakdown of the safety matrix and conformance suites.
+
+---
+
+## Future Improvements
+
+To transition `stricc` from a prototype to a production-grade compiler, the following roadmap of future improvements is planned:
+
+*   **Documentation of Source Code**: Enhance inline code comments, expand Rustdoc documentation for internal compiler API interfaces (lexer, parser, typechecker, and codegen modules), and publish comprehensive design details.
+*   **Limitation of Source Code File Size**: Implement strict compiler guards or compiler limits on source file sizes, token counts, and recursion depth to prevent denial-of-service (DoS) style stack exhaustion during parsing and analysis phases.
+*   **Ensuring Idiomatic Rust**: Refactor legacy areas of the compiler backend to use idiomatic Rust patterns (e.g., proper error propagation with `Result`/`Option`, zero-copy parsing where feasible, and avoiding unnecessary clones/unwraps).
+*   **Performance Metrics & Benchmarking**: Integrate automated benchmarking suites (e.g., using `criterion`) to track compile-time performance, memory consumption of the compiler, and runtime overhead of safety-instrumented executables.
+*   **More Tests**: Expand the test suites to include more edge cases, deeper integration tests for complex pointer aliasing, and larger real-world C codebases to improve coverage and reliability.
+*   **Alternative Backends & LLVM Removal**: Investigate replacing the LLVM/Inkwell backend with a custom lightweight backend or code generator to reduce compilation dependencies, build times, and runtime binary footprint.
+
+
 
