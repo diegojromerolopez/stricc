@@ -20,4 +20,10 @@ Written in Rust and utilizing LLVM (`inkwell`) for optimizing code generation, `
 cli_usage
 ub_mitigation
 differences
+architecture
+memory_model
+libc_ffi
+performance
+transition_guide
+developer_guide
 ```

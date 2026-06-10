@@ -95,3 +95,46 @@ Alternatively, set the environment variable before running cmake:
 export CC=/path/to/stricc
 cmake ..
 ```
+
+---
+
+## Running with Docker (Alternative Setup)
+
+If you want to try `stricc` without installing LLVM 18, Rust, or other build tools on your local system, you can use the provided [Dockerfile.run](../Dockerfile.run). This builds a lightweight sandbox container containing the compiler and all runtime dependencies.
+
+### 1. Build the image
+```bash
+docker build -f Dockerfile.run -t stricc-sandbox .
+```
+
+### 2. Verify the installation
+```bash
+docker run --rm stricc-sandbox stricc --help
+```
+
+### 3. Compile and run local C programs
+Mount your current directory into the container to compile C files using `stricc`. Note that since `stricc` targets a custom safe subset of C, platform-specific header includes (like `<stdio.h>`) are not directly supported; instead, declare functions like `printf` manually:
+```bash
+# Create a test file
+echo -e 'int printf(const char *format, ...);\nint main() { printf("Hello from stricc inside Docker!\\n"); return 0; }' > test.c
+
+# Compile the file
+docker run --rm -v "$(pwd)":/src stricc-sandbox stricc -o test test.c
+
+# Run the binary
+docker run --rm -v "$(pwd)":/src stricc-sandbox ./test
+```
+
+---
+
+## Running Tests
+
+To verify correctness of the compiler driver and target output generation, run:
+
+```bash
+# Run all workspace unit tests and integration tests
+cargo test --workspace
+
+# Run integration safety checks specifically
+cargo test --package stricc --test runner
+```
