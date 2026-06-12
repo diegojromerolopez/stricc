@@ -47,5 +47,3 @@ RUN CC=o64-clang CXX=o64-clang++ cargo build --release --target x86_64-apple-dar
 FROM scratch AS exporter
 COPY --from=builder /usr/src/stricc/target/x86_64-apple-darwin/release/stricc /stricc-macos-x86_64
 COPY --from=builder /usr/src/stricc/target/aarch64-apple-darwin/release/stricc /stricc-macos-aarch64
-COPY --from=builder /usr/src/stricc/target/x86_64-apple-darwin/release/libstricc_rt.a /libstricc_rt-macos-x86_64.a
-COPY --from=builder /usr/src/stricc/target/aarch64-apple-darwin/release/libstricc_rt.a /libstricc_rt-macos-aarch64.a

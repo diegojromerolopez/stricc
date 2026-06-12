@@ -39,9 +39,21 @@ impl<'a> Parser<'a> {
                         format!("Lexer error: {err}"),
                         &current_filename,
                     ));
+                    // Always ensure we push an EOF token as sentinel
+                    tokens.push(Token {
+                        kind: TokenKind::EOF,
+                        span: crate::error::Span::new(source.len(), source.len()),
+                    });
                     break;
                 }
             }
+        }
+
+        if tokens.is_empty() {
+            tokens.push(Token {
+                kind: TokenKind::EOF,
+                span: crate::error::Span::new(0, 0),
+            });
         }
 
         Self {
@@ -54,18 +66,27 @@ impl<'a> Parser<'a> {
     }
 
     fn current_token(&self) -> &Token {
-        &self.tokens[self.position]
+        if self.position >= self.tokens.len() {
+            &self.tokens[self.tokens.len() - 1]
+        } else {
+            &self.tokens[self.position]
+        }
     }
 
     fn advance(&mut self) -> &Token {
         if !self.is_at_end() {
             self.position += 1;
         }
-        &self.tokens[self.position - 1]
+        if self.position == 0 {
+            &self.tokens[0]
+        } else {
+            &self.tokens[self.position - 1]
+        }
     }
 
     fn is_at_end(&self) -> bool {
-        matches!(self.current_token().kind, TokenKind::EOF)
+        self.position >= self.tokens.len() - 1
+            || matches!(self.current_token().kind, TokenKind::EOF)
     }
 
     fn check(&self, kind: &TokenKind) -> bool {

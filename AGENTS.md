@@ -13,7 +13,7 @@ Before proposing or making modifications, review the core design specs:
 ---
 
 ## 🛠️ Linter & Formatting Guardrails
-We maintain strict code quality standards. Ensure you run these commands before finalizing any changes:
+We maintain strict code quality standards. **Both linters (cargo fmt and cargo clippy) must pass without warnings or errors.** Ensure you run these commands before finalizing any changes:
 * **Code Formatting**:
   ```bash
   cargo fmt --all
@@ -26,7 +26,7 @@ We maintain strict code quality standards. Ensure you run these commands before 
 ---
 
 ## 🧪 Testing Suites & Validation
-Verify changes using the following three categories of tests:
+**All tests must pass successfully after any change in the code.** Verify changes using the following three categories of tests:
 
 ### 1. Unit Tests
 Located in `stricc/tests/unit/`:

@@ -17,14 +17,20 @@ fn get_workspace_root() -> PathBuf {
     }
 }
 
+use std::sync::Once;
+
+static BUILD_COMPILER_ONCE: Once = Once::new();
+
 fn build_compiler() {
-    let status = Command::new("cargo")
-        .arg("build")
-        .arg("--workspace")
-        .current_dir(get_workspace_root())
-        .status()
-        .expect("Failed to run cargo build");
-    assert!(status.success(), "Workspace build failed");
+    BUILD_COMPILER_ONCE.call_once(|| {
+        let status = Command::new("cargo")
+            .arg("build")
+            .arg("--workspace")
+            .current_dir(get_workspace_root())
+            .status()
+            .expect("Failed to run cargo build");
+        assert!(status.success(), "Workspace build failed");
+    });
 }
 
 fn run_test_case(case: &TestCase) {

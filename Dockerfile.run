@@ -42,8 +42,7 @@ RUN TARGET_TRIPLE="$(uname -m)-unknown-linux-musl" && \
     export LIBRARY_PATH=/usr/lib && \
     cargo build --release --workspace --target "$TARGET_TRIPLE" && \
     mkdir -p target/release && \
-    cp target/$TARGET_TRIPLE/release/stricc target/release/stricc && \
-    cp target/$TARGET_TRIPLE/release/libstricc_rt.a target/release/libstricc_rt.a
+    cp target/$TARGET_TRIPLE/release/stricc target/release/stricc
 
 # Stage 2: Runtime environment
 FROM alpine:3.21
@@ -58,9 +57,8 @@ RUN apk add --no-cache \
 # Ensure "clang" is accessible in PATH as a standard symlink
 RUN ln -sf /usr/bin/clang-18 /usr/bin/clang
 
-# Copy the statically compiled stricc binary and runtime library from the builder
+# Copy the statically compiled stricc binary from the builder
 COPY --from=builder /usr/src/stricc/target/release/stricc /usr/local/bin/stricc
-COPY --from=builder /usr/src/stricc/target/release/libstricc_rt.a /usr/local/bin/libstricc_rt.a
 
 # Create a directory for user code
 WORKDIR /src

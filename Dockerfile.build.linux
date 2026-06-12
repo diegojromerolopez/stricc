@@ -47,10 +47,8 @@ RUN TARGET_TRIPLE="$(uname -m)-unknown-linux-musl" && \
     export LIBRARY_PATH=/usr/lib && \
     cargo build --release --workspace --target "$TARGET_TRIPLE" && \
     mkdir -p target/release && \
-    cp target/$TARGET_TRIPLE/release/stricc target/release/stricc && \
-    cp target/$TARGET_TRIPLE/release/libstricc_rt.a target/release/libstricc_rt.a
+    cp target/$TARGET_TRIPLE/release/stricc target/release/stricc
 
 # Stage 2: Output exporter stage
 FROM scratch AS exporter
 COPY --from=builder /usr/src/stricc/target/release/stricc /stricc-linux
-COPY --from=builder /usr/src/stricc/target/release/libstricc_rt.a /libstricc_rt-linux.a

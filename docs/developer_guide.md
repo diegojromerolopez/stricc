@@ -66,6 +66,10 @@ The root directory contains a `Makefile` that simplifies building and running th
   ```bash
   make test-llvm
   ```
+- **Run real-world applications build tests** (downloads, configures, and compiles SQLite, Doom, Lua, and minilisp using the compiled `stricc` binary to verify real-world project compatibility):
+  ```bash
+  make test-build-apps
+  ```
 
 Refer to [TEST.md](../TEST.md) for a complete breakdown of the safety matrix and conformance suites.
 

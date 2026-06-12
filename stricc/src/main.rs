@@ -2,6 +2,57 @@ use clap::{Arg, Command};
 use stricc::driver::{CompilerPipeline, Driver, DriverOptions};
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut filtered_args = Vec::new();
+    let mut skip_next = false;
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            // Check if it is a supported option
+            if arg == "-c"
+                || arg == "-S"
+                || arg == "--emit-llvm"
+                || arg == "-E"
+                || arg == "-h"
+                || arg == "--help"
+                || arg == "-V"
+                || arg == "--version"
+            {
+                filtered_args.push(arg.clone());
+            } else if arg == "-o" || arg == "--output" {
+                filtered_args.push(arg.clone());
+                if i + 1 < args.len() {
+                    filtered_args.push(args[i + 1].clone());
+                    skip_next = true;
+                }
+            } else if arg.starts_with("-O") {
+                filtered_args.push(arg.clone());
+            } else if arg.starts_with("-I") {
+                filtered_args.push(arg.clone());
+                // Handle split option like "-I path"
+                if arg == "-I" && i + 1 < args.len() {
+                    filtered_args.push(args[i + 1].clone());
+                    skip_next = true;
+                }
+            } else if arg.starts_with("-D") {
+                filtered_args.push(arg.clone());
+                // Handle split option like "-D macro"
+                if arg == "-D" && i + 1 < args.len() {
+                    filtered_args.push(args[i + 1].clone());
+                    skip_next = true;
+                }
+            } else {
+                // Unsupported flag — skip it!
+            }
+        } else {
+            // Positional argument (input file, etc.)
+            filtered_args.push(arg.clone());
+        }
+    }
+
     let matches = Command::new("stricc")
         .version(env!("CARGO_PKG_VERSION"))
         .about("stricc: Safe C Compiler")
@@ -61,7 +112,7 @@ fn main() {
                 .help("Define macro")
                 .action(clap::ArgAction::Append),
         )
-        .get_matches();
+        .get_matches_from(filtered_args);
 
     let inputs: Vec<String> = matches
         .get_many::<String>("inputs")

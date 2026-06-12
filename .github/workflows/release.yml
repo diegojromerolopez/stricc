@@ -78,8 +78,6 @@ jobs:
         with:
           files: |
             dist/stricc-linux
-            dist/libstricc_rt-linux.a
             dist/stricc-macos
-            dist/libstricc_rt-macos.a
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

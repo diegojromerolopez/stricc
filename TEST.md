@@ -21,6 +21,7 @@ graph TD
     A --> C[2. Safety & UB Traps]
     A --> D[3. Differential & Fuzz Testing]
     A --> E[4. Unit & Property Testing]
+    A --> F[5. Real-World Applications]
     
     B --> B1[GCC C Torture Suite]
     B --> B2[C23 Conformance Checks]
@@ -30,6 +31,11 @@ graph TD
     
     D --> D1[Csmith Program Generator]
     D --> D2[cargo-fuzz Parser Testing]
+
+    F --> F1[SQLite Shell]
+    F --> F2[Doom Engine]
+    F --> F3[Lua Interpreter]
+    F --> F4[MiniLisp Interpreter]
 ```
 
 ### 2.1 Conformance & Compliance Testing (Differential Execution)
@@ -67,6 +73,18 @@ To achieve test scales of **10,000+ test cases**, we integrate automated tools:
 ### 2.4 Unit & Property-Based Testing
 * **Rust Unit Tests**: Every module in `lexer`, `parser`, `typechecker`, and `codegen` must have corresponding Unit Tests.
 * **Property-Based Testing (`proptest`)**: Generate random abstract syntax trees (ASTs) to verify that formatting and semantic analysis properties hold (e.g., parsing a formatted AST produces the identical AST).
+
+### 2.5 Real-World Application Integration Testing
+To verify end-to-end compatibility, compilation stability, and correctness against larger real-world C codebases, `stricc` integrates a suite of classic C applications:
+* **SQLite (Amalgamation)**: Compiles the full single-file SQLite database engine (`sqlite3.c`) and shell.
+* **Doom (`doomgeneric`)**: Compiles a standard Doom source port (`doomgeneric`) targeting SDL and basic graphics.
+* **Lua Interpreter**: Compiles the official Lua scripting language interpreter.
+* **MiniLisp**: Compiles a lightweight Lisp interpreter to verify parser correctness under deeply nested expression evaluations.
+
+Developers can execute this integration suite locally using the following target:
+```bash
+make test-build-apps
+```
 
 ---
 

@@ -321,7 +321,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libstricc_rt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "backtrace",
  "libc",
@@ -504,7 +504,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "stricc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ariadne",
  "clap",

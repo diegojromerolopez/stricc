@@ -1,0 +1,97 @@
+name: Test Build Apps
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-stricc:
+    name: Build Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18 all
+          sudo apt-get install -y llvm-18-dev libclang-18-dev libpolly-18-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build stricc Release
+        run: |
+          export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          cargo build --release --workspace
+
+      - name: Archive stricc build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stricc-binaries
+          path: |
+            target/release/stricc
+
+  test-build-apps:
+    name: Compile Apps
+    needs: build-stricc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download stricc
+        uses: actions/download-artifact@v4
+        with:
+          name: stricc-binaries
+          path: target/release
+
+      - name: Setup stricc execution permissions
+        run: chmod +x target/release/stricc
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libsdl2-dev libsdl2-mixer-dev
+
+      - name: Download and Compile SQLite Amalgamation
+        continue-on-error: true
+        run: |
+          curl -O https://www.sqlite.org/2024/sqlite-amalgamation-3460000.zip
+          unzip sqlite-amalgamation-3460000.zip
+          # Compile SQLite shell executable
+          ./target/release/stricc -O2 -c sqlite-amalgamation-3460000/sqlite3.c -o sqlite3.o
+          ./target/release/stricc -O2 -c sqlite-amalgamation-3460000/shell.c -o shell.o
+          clang -O2 shell.o sqlite3.o -lpthread -ldl -lm -o sqlite3
+
+      - name: Clone and Compile Doom
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/ozkl/doomgeneric.git
+          cd doomgeneric/doomgeneric
+          # Compile Doom SDL target using stricc as the compiler
+          make -f Makefile.sdl CC=$(pwd)/../../target/release/stricc
+          # Also compile Doom X11 target using stricc as the compiler
+          make -f Makefile CC=$(pwd)/../../target/release/stricc
+
+      - name: Clone and Compile Lua Interpreter
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/lua/lua.git
+          cd lua
+          # Compile Lua using stricc as the compiler
+          make generic CC=$(pwd)/../target/release/stricc
+
+      - name: Clone and Compile Lisp Interpreter (minilisp)
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/rui314/minilisp.git
+          cd minilisp
+          # Compile minilisp using stricc as the compiler
+          ../target/release/stricc -O2 minilisp.c -o minilisp

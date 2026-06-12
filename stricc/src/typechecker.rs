@@ -904,8 +904,14 @@ impl Typechecker {
         if let (Type::Pointer(inner_dest), Type::Pointer(inner_src)) = (dest, src) {
             let unwrapped_dest = Self::unwrap_const(inner_dest);
             let unwrapped_src = Self::unwrap_const(inner_src);
-            if unwrapped_dest == unwrapped_src || *unwrapped_dest == Type::Void || *unwrapped_src == Type::Void {
-                if Self::has_const(inner_src) && !Self::has_const(inner_dest) && *unwrapped_dest != Type::Void {
+            if unwrapped_dest == unwrapped_src
+                || *unwrapped_dest == Type::Void
+                || *unwrapped_src == Type::Void
+            {
+                if Self::has_const(inner_src)
+                    && !Self::has_const(inner_dest)
+                    && *unwrapped_dest != Type::Void
+                {
                     return Err(Diagnostic::error_with_span(
                         format!("Incompatible pointer conversion: cannot implicitly discard const qualifier in assignment from {src:?} to {dest:?}"),
                         span,

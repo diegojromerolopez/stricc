@@ -218,6 +218,11 @@ The `stricc` CLI mimics standard GCC flags:
 ./target/release/stricc -O3 -I./include -o app main.c
 ```
 
+> [!NOTE]
+> **CLI Option Pre-Filtering for Compatibility:**
+> To ensure compatibility with standard C Makefiles and build scripts, `stricc` automatically strips/ignores unsupported compiler options starting with `-` (such as `-g`, `-std`, `-W...`, and `-f...` options) before argument parsing. This allows you to build existing codebases without modifying their compiler configurations.
+
+
 ### 4. Build System Integration
 Since `stricc` mimics GCC flags, you can easily plug it into your existing build tools.
 
@@ -242,6 +247,11 @@ cargo test --workspace
 # Run integration safety checks specifically
 cargo test --package stricc --test runner
 ```
+*   **Run real-world applications build tests** (SQLite, Doom, Lua, minilisp):
+    ```bash
+    make test-build-apps
+    ```
+
 
 ---
 
@@ -303,6 +313,11 @@ The root directory contains a `Makefile` that simplifies building and running th
     ```bash
     make test-llvm
     ```
+*   **Run real-world applications build tests** (downloads and compiles SQLite, Doom, Lua, and minilisp to verify compatibility):
+    ```bash
+    make test-build-apps
+    ```
+
 
 Refer to [TEST.md](file:///Users/diegoj/repos/stricc/TEST.md) for a complete breakdown of the safety matrix and conformance suites.
 

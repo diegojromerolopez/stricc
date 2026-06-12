@@ -70,8 +70,23 @@ The CLI parser supports the following common GCC options:
 | `-O0`, `-O1`, `-O2`, `-O3` | Optimization levels | Translates directly to LLVM optimization and vectorization pipeline levels. |
 | `-I <dir>` | Add directory to include search path | Appends directory to host preprocessor include directories. |
 | `-D <macro>[=val]` | Define preprocessor macro | Passes preprocessor macro definitions downstream. |
-| `-Wall`, `-Wextra` | Enable compilation warnings | Activates strict warnings and diagnostic checking during analysis. |
-| `-std=<val>` | Specify language standard | Configures dialect compliance checking (e.g. `-std=c23`). |
+| `-Wall`, `-Wextra` | Enable compilation warnings | *Ignored/Filtered* (stripped automatically for build system compatibility). |
+| `-std=<val>` | Specify language standard | *Ignored/Filtered* (stripped automatically for build system compatibility). |
+
+---
+
+## CLI Option Pre-Filtering for Compatibility
+
+To allow easy integration with existing codebases, build systems (such as `Make` and `CMake`), and build scripts, `stricc` implements a pre-filtering pass on CLI arguments. Before parsing arguments via `clap`, any unsupported compiler options starting with `-` are silently stripped/ignored instead of failing compilation.
+
+Common compiler flags that are automatically ignored include:
+- Debugging options: `-g`, `-ggdb`, `-ggdb3`, etc.
+- Warning options: `-Wall`, `-Wextra`, `-Werror`, `-Wpedantic`, etc.
+- Language standard compliance flags: `-std=c11`, `-std=c23`, etc.
+- Codegen and architecture tuning options: `-march=native`, `-fstack-protector`, etc.
+- Unsupported warning suppression/enablement flags: `-Wno-...`, `-W...`, etc.
+
+This allows build configurations calling standard compiler flags (e.g., `CFLAGS="-O2 -g -Wall"`) to compile using `stricc` without modification.
 
 ---
 
