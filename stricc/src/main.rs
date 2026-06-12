@@ -176,10 +176,9 @@ fn main() {
                 cmd.arg(obj);
             }
 
-            // Runtime lib path is resolved the same way as in Linker::resolve_runtime_lib().
-            // We replicate it here to avoid making Linker public — the actual logic is in driver.rs.
-            let rt_lib = resolve_rt_lib_path();
-            cmd.arg(rt_lib).arg("-o").arg(&output_name);
+            // Write the embedded runtime library to a temporary file
+            let rt_temp = stricc::get_runtime_lib_tempfile().unwrap();
+            cmd.arg(rt_temp.path()).arg("-o").arg(&output_name);
 
             let status = cmd
                 .status()
@@ -191,48 +190,4 @@ fn main() {
             }
         }
     }
-}
-
-/// Resolve the runtime library path for the multi-file link step.
-///
-/// Mirrors `Linker::resolve_runtime_lib` in `driver.rs`.
-fn resolve_rt_lib_path() -> String {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let candidate = exe_dir.join("libstricc_rt.a");
-            if candidate.exists() {
-                return candidate.to_str().unwrap().to_string();
-            }
-        }
-    }
-    if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
-        if std::path::Path::new(&env_path).exists() {
-            return env_path;
-        }
-    }
-    let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        std::path::PathBuf::from(dir)
-            .parent()
-            .unwrap()
-            .to_path_buf()
-    } else {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .to_path_buf()
-    };
-    for sub in &[
-        "target/debug/libstricc_rt.a",
-        "target/release/libstricc_rt.a",
-    ] {
-        let candidate = workspace_root.join(sub);
-        if candidate.exists() {
-            return candidate.to_str().unwrap().to_string();
-        }
-    }
-    workspace_root
-        .join("target/debug/libstricc_rt.a")
-        .to_str()
-        .unwrap()
-        .to_string()
 }

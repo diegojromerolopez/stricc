@@ -1,7 +1,8 @@
 [package]
 name = "stricc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }

@@ -3,7 +3,7 @@ use crate::parser::Parser;
 use crate::typechecker::Typechecker;
 use inkwell::context::Context;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 // ─── CompilerError ────────────────────────────────────────────────────────────
@@ -371,20 +371,24 @@ impl OutputWriter {
 
 // ─── Linker ───────────────────────────────────────────────────────────────────
 
-/// Resolves the runtime static library path and invokes the system linker.
+/// Invokes the system linker with the embedded runtime library.
 ///
-/// **Single responsibility**: knows only about finding `libstricc_rt.a` and
-/// invoking `clang` for final linking.
+/// **Single responsibility**: knows only about invoking `clang` for final linking.
 struct Linker;
 
 impl Linker {
     fn link(ll_path: &str, output_name: &str, opt_level: u32) -> Result<(), CompilerError> {
-        let rt_lib = Self::resolve_runtime_lib();
+        let rt_temp = crate::get_runtime_lib_tempfile().map_err(|e| {
+            CompilerError::Io(format!(
+                "Failed to create temporary runtime library file: {e}"
+            ))
+        })?;
+        let rt_path = rt_temp.path();
 
         let status = Command::new("clang")
             .arg(format!("-O{opt_level}"))
             .arg(ll_path)
-            .arg(&rt_lib)
+            .arg(rt_path)
             .arg("-o")
             .arg(output_name)
             .status()
@@ -394,61 +398,6 @@ impl Linker {
             return Err(CompilerError::LinkError);
         }
         Ok(())
-    }
-
-    /// Search for `libstricc_rt.a` in the following order:
-    ///
-    /// 1. Same directory as the running compiler executable.
-    /// 2. `STRICC_RT_PATH` environment variable.
-    /// 3. `target/{debug,release}/` relative to the Cargo workspace root
-    ///    (detected via `CARGO_MANIFEST_DIR` or a hard-coded fallback).
-    fn resolve_runtime_lib() -> String {
-        // 1. Alongside the compiler binary
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let candidate = exe_dir.join("libstricc_rt.a");
-                if candidate.exists() {
-                    return candidate.to_str().unwrap().to_string();
-                }
-            }
-        }
-
-        // 2. Environment variable
-        if let Ok(env_path) = std::env::var("STRICC_RT_PATH") {
-            if Path::new(&env_path).exists() {
-                return env_path;
-            }
-        }
-
-        // 3. Workspace root heuristic
-        let workspace_root = if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            PathBuf::from(dir)
-                .parent()
-                .expect("CARGO_MANIFEST_DIR has no parent")
-                .to_path_buf()
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("CARGO_MANIFEST_DIR has no parent")
-                .to_path_buf()
-        };
-
-        for sub in &[
-            "target/debug/libstricc_rt.a",
-            "target/release/libstricc_rt.a",
-        ] {
-            let candidate = workspace_root.join(sub);
-            if candidate.exists() {
-                return candidate.to_str().unwrap().to_string();
-            }
-        }
-
-        // Last resort: compile-time known path (replaces hardcoded runtime string)
-        workspace_root
-            .join("target/debug/libstricc_rt.a")
-            .to_str()
-            .unwrap()
-            .to_string()
     }
 }
 
