@@ -30,3 +30,11 @@ temp_test
 docs/_build/
 
 
+
+# Noctifab runtime & secrets
+.noctifab/data/
+.noctifab/logs/
+.noctifab/report/
+.noctifab/worktrees/
+.noctifab/*.pid
+.noctifab/secrets.yaml
