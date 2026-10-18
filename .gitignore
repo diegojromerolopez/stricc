@@ -38,3 +38,19 @@ docs/_build/
 .noctifab/worktrees/
 .noctifab/*.pid
 .noctifab/secrets.yaml
+
+# Added by Noctifab pre-flight guardrails
+.noctifab/
+node_modules/
+build/
+bin/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.bundle/
+*.class
+*.o
+*.so
+*.dylib
+*.log
